@@ -18,8 +18,16 @@ export interface Service {
   isEnabled: boolean;
   isMuted?: boolean;
   isNotificationEnabled?: boolean;
+  isBadgeEnabled?: boolean;
   order?: number;
   workspaces?: string[];
+  [k: string]: unknown;
+}
+
+export interface RecipePreview {
+  id: string;
+  name: string;
+  icons?: { svg?: string };
   [k: string]: unknown;
 }
 
@@ -71,6 +79,39 @@ export function showService(s: Service): Promise<void> {
 
 export function closeServices(): Promise<void> {
   return invoke("close_services");
+}
+
+export function hideServices(): Promise<void> {
+  return invoke("hide_all_services");
+}
+
+// Pousse les réglages d'un service (notif/mute/badge) que le poller Rust respecte.
+export function setServiceFlags(s: Service): Promise<void> {
+  return invoke("set_service_flags", {
+    serviceId: s.id,
+    notif: s.isNotificationEnabled !== false,
+    muted: s.isMuted === true,
+    badge: s.isBadgeEnabled !== false,
+  });
+}
+
+export function updateService(
+  serviceId: string,
+  patch: Record<string, unknown>,
+): Promise<unknown> {
+  return invoke("update_service", { serviceId, patch });
+}
+
+export function createService(name: string, recipeId: string): Promise<unknown> {
+  return invoke("create_service", { name, recipeId });
+}
+
+export function deleteService(serviceId: string): Promise<void> {
+  return invoke("delete_service", { serviceId });
+}
+
+export function listRecipes(): Promise<RecipePreview[]> {
+  return invoke("list_recipes");
 }
 
 // Ouvre les devtools sur la webview du service actif (debug).

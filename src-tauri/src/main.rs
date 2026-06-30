@@ -27,6 +27,11 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 const API_UA: &str = concat!("pakeFerdium/", env!("CARGO_PKG_VERSION"));
 // Largeur (logique) de la sidebar — doit coïncider avec le CSS du shell.
 const SIDEBAR_W: f64 = 240.0;
+// UA Safari moderne AVEC le token `Version/` : WhatsApp exige Safari >= 15, or la webview
+// WKWebView native n'expose pas toujours ce token (-> "navigateur non supporté"). On reste
+// du Safari (pas Chrome) pour ne pas casser les services qui dépendent du chemin Safari
+// (ex. Synology Chat, cassé par un UA Chrome). L'override par recipe viendra plus tard.
+const SERVICE_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
 #[derive(Default)]
 struct AppState {
@@ -35,6 +40,25 @@ struct AppState {
     created: Mutex<HashSet<String>>, // serviceId des webviews déjà créées
     active: Mutex<Option<String>>,   // serviceId actuellement affiché
     unread: Mutex<HashMap<String, i64>>, // non-lus par service (pour le badge dock)
+    flags: Mutex<HashMap<String, ServiceFlags>>, // réglages par service (notif/mute/badge)
+}
+
+#[derive(Clone, Copy)]
+struct ServiceFlags {
+    notif: bool,
+    muted: bool,
+    badge: bool,
+}
+
+impl Default for ServiceFlags {
+    fn default() -> Self {
+        // Par défaut : notifications + badge activés, non muté (comme Ferdium).
+        ServiceFlags {
+            notif: true,
+            muted: false,
+            badge: true,
+        }
+    }
 }
 
 // --- Auth ---------------------------------------------------------------
@@ -360,16 +384,9 @@ fn service_rect(
 const IPC_SHIM_JS: &str = r#"(function(){
   window.__PAKE_SHIM__ = (window.__PAKE_SHIM__ || 0) + 1;
   window.__pakeUnread = window.__pakeUnread || 0;
-  // Masque les globals Tauri : une webview de service doit se comporter comme un
-  // navigateur normal. Sinon les web apps Tauri-aware (ex. Telegram WebA) tentent des
-  // appels natifs bloqués (spam d'erreurs de capability) et masquent leurs badges DOM.
-  (function(){
-    var keys = ['__TAURI_INTERNALS__','__TAURI__','__TAURI_METADATA__','__TAURI_EVENT_PLUGIN_INTERNALS__','__TAURI_PATTERN__','isTauri'];
-    // delete pur : la propriété ne doit plus EXISTER (Telegram teste `k in window`).
-    function apply(){ keys.forEach(function(k){ if (k in window) { try { delete window[k]; } catch(e){} } }); }
-    apply();
-    var n = 0, iv = setInterval(function(){ apply(); if (++n > 120) clearInterval(iv); }, 25);
-  })();
+  // NB : Telegram Web A est une app Tauri qui appelle l'IPC bas niveau (fetch ipc:// +
+  // postMessage) ; impossible à neutraliser proprement depuis du JS injecté. Ses erreurs
+  // console sont du bruit non bloquant (Telegram fonctionne). Badge Telegram non géré.
   // Intercepte l'API web Notification (WKWebView ne la gère pas vraiment) : on empile
   // les notifs des services, drainées par le poller Rust -> notif système native.
   (function(){
@@ -472,14 +489,15 @@ async fn show_service(
         let runtime = recipe_webview_js(&app_data, &recipe_id)
             .await
             .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
-        // Pas d'override de User-Agent : on garde le UA natif WKWebView (Safari), qui
-        // correspond honnêtement au moteur. Spoofer Chrome casse certains services.
+        // UA Safari moderne (cf. SERVICE_UA) : satisfait WhatsApp (Safari >= 15) sans
+        // casser Synology (reste du Safari, pas du Chrome).
         //
         // Shim IPC injecté pour TOUS les services (comme Ferdium expose ipcRenderer à
         // toutes ses webviews) : ceux qui en dépendent (Synology Chat…) ne crashent plus,
         // les autres l'ignorent.
         let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
             .data_store_identifier(store)
+            .user_agent(SERVICE_UA)
             .initialization_script(IPC_SHIM_JS);
         if let Some(rt) = runtime {
             builder = builder.initialization_script(rt);
@@ -522,6 +540,18 @@ fn inspect_service(app: AppHandle, state: State<'_, AppState>) {
     }
 }
 
+// Masque toutes les webviews de services (pour afficher un panneau plein écran du shell).
+#[tauri::command]
+fn hide_all_services(app: AppHandle, state: State<'_, AppState>) {
+    let created: Vec<String> = state.created.lock().unwrap().iter().cloned().collect();
+    for sid in created {
+        if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
+            let _ = wv.hide();
+        }
+    }
+    *state.active.lock().unwrap() = None;
+}
+
 #[tauri::command]
 fn close_services(app: AppHandle, state: State<'_, AppState>) {
     let created: Vec<String> = state.created.lock().unwrap().drain().collect();
@@ -535,6 +565,111 @@ fn close_services(app: AppHandle, state: State<'_, AppState>) {
     if let Some(win) = app.get_window("main") {
         let _ = win.set_badge_count(None);
     }
+}
+
+// Enregistre les réglages d'un service (notif/mute/badge) respectés par le poller.
+#[tauri::command]
+fn set_service_flags(
+    state: State<'_, AppState>,
+    service_id: String,
+    notif: bool,
+    muted: bool,
+    badge: bool,
+) {
+    state
+        .flags
+        .lock()
+        .unwrap()
+        .insert(service_id, ServiceFlags { notif, muted, badge });
+}
+
+// Modifie un service (réglages) -> PUT /v1/service/:id. `patch` doit inclure `name`.
+#[tauri::command]
+async fn update_service(
+    state: State<'_, AppState>,
+    service_id: String,
+    patch: Value,
+) -> Result<Value, String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .put(format!("{base}/v1/service/{service_id}"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .json(&patch)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Modification du service : HTTP {}", res.status()));
+    }
+    res.json().await.map_err(|e| e.to_string())
+}
+
+// Crée un service -> POST /v1/service.
+#[tauri::command]
+async fn create_service(
+    state: State<'_, AppState>,
+    name: String,
+    recipe_id: String,
+) -> Result<Value, String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .post(format!("{base}/v1/service"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .json(&serde_json::json!({ "name": name, "recipeId": recipe_id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Création du service : HTTP {}", res.status()));
+    }
+    res.json().await.map_err(|e| e.to_string())
+}
+
+// Supprime un service -> DELETE /v1/service/:id (+ ferme la webview).
+#[tauri::command]
+async fn delete_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<(), String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .delete(format!("{base}/v1/service/{service_id}"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Suppression du service : HTTP {}", res.status()));
+    }
+    if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
+        let _ = wv.close();
+    }
+    state.created.lock().unwrap().remove(&service_id);
+    state.unread.lock().unwrap().remove(&service_id);
+    state.flags.lock().unwrap().remove(&service_id);
+    Ok(())
+}
+
+// Catalogue complet de recipes -> GET /v1/recipes. Le filtre se fait côté frontend.
+// (Le serveur officiel ne sert pas /recipes/search — il renvoie [].)
+#[tauri::command]
+async fn list_recipes(state: State<'_, AppState>) -> Result<Value, String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .get(format!("{base}/v1/recipes"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Catalogue de recipes : HTTP {}", res.status()));
+    }
+    res.json().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -581,28 +716,41 @@ fn start_badge_poller(app: AppHandle) {
                     let v: serde_json::Value =
                         serde_json::from_str(&res).unwrap_or(serde_json::Value::Null);
                     let unread = v.get("u").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let flags = app2
+                        .state::<AppState>()
+                        .flags
+                        .lock()
+                        .unwrap()
+                        .get(&sid)
+                        .copied()
+                        .unwrap_or_default();
 
-                    // Notifications natives (file drainée par le splice ci-dessus).
-                    if let Some(arr) = v.get("n").and_then(|x| x.as_array()) {
-                        for notif in arr {
-                            let title = notif.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
-                            let body = notif.get("body").and_then(|x| x.as_str()).unwrap_or("");
-                            if title.is_empty() && body.is_empty() {
-                                continue;
+                    // Notifications : on respecte mute / notifications désactivées.
+                    if flags.notif && !flags.muted {
+                        if let Some(arr) = v.get("n").and_then(|x| x.as_array()) {
+                            for notif in arr {
+                                let title =
+                                    notif.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
+                                let body = notif.get("body").and_then(|x| x.as_str()).unwrap_or("");
+                                if title.is_empty() && body.is_empty() {
+                                    continue;
+                                }
+                                let _ = app2
+                                    .notification()
+                                    .builder()
+                                    .title(if title.is_empty() { "Message" } else { title })
+                                    .body(body)
+                                    .show();
                             }
-                            let _ = app2
-                                .notification()
-                                .builder()
-                                .title(if title.is_empty() { "Message" } else { title })
-                                .body(body)
-                                .show();
                         }
                     }
 
+                    // Badge : contribution nulle si badge désactivé ou service muté.
+                    let contribution = if flags.badge && !flags.muted { unread } else { 0 };
                     let total = {
                         let st = app2.state::<AppState>();
                         let mut m = st.unread.lock().unwrap();
-                        m.insert(sid.clone(), unread);
+                        m.insert(sid.clone(), contribution);
                         m.values().sum::<i64>()
                     };
                     if let Some(win) = app2.get_window("main") {
@@ -698,8 +846,14 @@ fn main() {
             get_workspaces,
             show_service,
             inspect_service,
+            hide_all_services,
             close_services,
-            logout
+            logout,
+            set_service_flags,
+            update_service,
+            create_service,
+            delete_service,
+            list_recipes
         ])
         .build(tauri::generate_context!())
         .expect("erreur au lancement de l'application tauri")
