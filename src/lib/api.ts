@@ -114,6 +114,23 @@ export function listRecipes(): Promise<RecipePreview[]> {
   return invoke("list_recipes");
 }
 
+export interface AppSettings {
+  autostart: boolean;
+  startMinimized: boolean;
+  theme: "dark" | "light" | "system";
+  [k: string]: unknown;
+}
+
+export function getAppSettings(): Promise<AppSettings> {
+  return invoke("get_app_settings");
+}
+
+export function setAppSettings(
+  patch: Partial<AppSettings>,
+): Promise<AppSettings> {
+  return invoke("set_app_settings", { patch });
+}
+
 // Ouvre les devtools sur la webview du service actif (debug).
 export function inspectService(): Promise<void> {
   return invoke("inspect_service");

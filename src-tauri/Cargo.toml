@@ -15,6 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 base64 = "0.22"
 tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
 
 [[bin]]
 name = "pakeferdium"

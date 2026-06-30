@@ -15,11 +15,14 @@
     createService,
     deleteService,
     listRecipes,
+    getAppSettings,
+    setAppSettings,
     DEFAULT_SERVER,
     type MeUser,
     type Service,
     type Workspace,
     type RecipePreview,
+    type AppSettings,
   } from "./lib/api";
 
   let server = $state(DEFAULT_SERVER);
@@ -36,10 +39,16 @@
   let workspaces = $state<Workspace[]>([]);
   let activeId = $state<string | null>(null);
 
-  // Vue de la zone droite : un service, les réglages d'un service, ou l'ajout.
-  type View = "service" | "svcSettings" | "add";
+  // Vue de la zone droite : un service, réglages d'un service, ajout, réglages app.
+  type View = "service" | "svcSettings" | "add" | "appSettings";
   let view = $state<View>("service");
   let settingsSvc = $state<Service | null>(null);
+
+  let appSettings = $state<AppSettings>({
+    autostart: false,
+    startMinimized: false,
+    theme: "system",
+  });
 
   // Ajout de service : catalogue complet chargé une fois, filtré en live.
   let recipeQuery = $state("");
@@ -68,7 +77,22 @@
     sorted.filter((s) => !workspaces.some((w) => w.services.includes(s.id))),
   );
 
+  const darkMq =
+    typeof window !== "undefined"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : null;
+
   onMount(async () => {
+    // Suit l'apparence du système quand le thème est sur « système ».
+    darkMq?.addEventListener("change", () => {
+      if (appSettings.theme === "system") applyTheme();
+    });
+    try {
+      appSettings = await getAppSettings();
+      applyTheme();
+    } catch {
+      /* défauts */
+    }
     try {
       me = await restoreSession();
       await loadAfterAuth();
@@ -78,6 +102,31 @@
       booting = false;
     }
   });
+
+  function applyTheme() {
+    const dark =
+      appSettings.theme === "dark" ||
+      (appSettings.theme === "system" && (darkMq?.matches ?? true));
+    document.body.classList.toggle("light", !dark);
+  }
+
+  function openAppSettings() {
+    view = "appSettings";
+    hideServices();
+  }
+
+  async function saveAppSetting(key: keyof AppSettings, value: unknown) {
+    (appSettings as Record<string, unknown>)[key] = value;
+    if (key === "theme") applyTheme();
+    try {
+      appSettings = await setAppSettings({
+        [key]: value,
+      } as Partial<AppSettings>);
+      applyTheme();
+    } catch (err) {
+      error = String(err);
+    }
+  }
 
   async function loadAfterAuth() {
     [services, workspaces] = await Promise.all([getServices(), getWorkspaces()]);
@@ -269,6 +318,7 @@
         </div>
       {/if}
 
+      <button class="appcog" onclick={openAppSettings}>⚙ Réglages</button>
       <div class="count">{services.length} services · {workspaces.length} workspaces</div>
     </aside>
 
@@ -334,6 +384,59 @@
             </div>
           {/if}
         </div>
+      {:else if view === "appSettings"}
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Réglages</h2>
+            <button class="link" onclick={backToService}>✕ fermer</button>
+          </div>
+
+          <div class="setblock">
+            <div class="set-title">Apparence</div>
+            <label class="row-toggle">
+              <span>Thème</span>
+              <select
+                class="select"
+                value={appSettings.theme}
+                onchange={(e) => saveAppSetting("theme", e.currentTarget.value)}
+              >
+                <option value="system">Système</option>
+                <option value="dark">Sombre</option>
+                <option value="light">Clair</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="setblock">
+            <div class="set-title">Démarrage</div>
+            <label class="row-toggle">
+              <input
+                type="checkbox"
+                checked={appSettings.autostart}
+                onchange={(e) => saveAppSetting("autostart", e.currentTarget.checked)}
+              />
+              <span>Lancer au démarrage de la session</span>
+            </label>
+            <label class="row-toggle">
+              <input
+                type="checkbox"
+                checked={appSettings.startMinimized}
+                onchange={(e) => saveAppSetting("startMinimized", e.currentTarget.checked)}
+              />
+              <span>Démarrer en arrière-plan (fenêtre masquée)</span>
+            </label>
+          </div>
+
+          <div class="setblock">
+            <div class="set-title">Serveur</div>
+            <code class="recipe">{server}</code>
+            <p class="sub">
+              Connecté : {me.email}. Pour changer de serveur, déconnecte-toi.
+            </p>
+          </div>
+
+          {#if error}<p class="error">{error}</p>{/if}
+        </div>
       {/if}
     </section>
   </div>
@@ -370,88 +473,111 @@
 {/snippet}
 
 <style>
+  :global(:root) {
+    --bg: #1f2230; --sidebar: #1b1d28; --card: #282b3a; --panel: #232633;
+    --input: #1f2230; --border: #2f3445; --border2: #3a3f55;
+    --text: #e8e8ef; --text2: #d6d9e6; --muted: #9aa0b5; --muted2: #6b7193;
+    --hover: #262a3a; --accent: #4f46e5; --accent-soft: #b9b2ff; --link: #7a82a8;
+  }
+  :global(body.light) {
+    --bg: #f3f4f8; --sidebar: #e9ebf1; --card: #ffffff; --panel: #ffffff;
+    --input: #ffffff; --border: #d6dae6; --border2: #c8cddc;
+    --text: #1c2030; --text2: #2a2f40; --muted: #5b6280; --muted2: #818aa6;
+    --hover: #e4e7f0; --accent: #4f46e5; --accent-soft: #5b52d6; --link: #6d75a0;
+  }
   :global(body) {
     margin: 0;
     font-family: -apple-system, system-ui, sans-serif;
-    background: #1f2230;
-    color: #e8e8ef;
+    background: var(--bg);
+    color: var(--text);
   }
   .login { display: grid; place-items: center; height: 100vh; }
   .card {
-    background: #282b3a; padding: 28px; border-radius: 14px; width: 320px;
+    background: var(--card); padding: 28px; border-radius: 14px; width: 320px;
     display: flex; flex-direction: column; gap: 12px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
   }
   .card h1 { margin: 0; font-size: 24px; }
-  .sub { margin: 0 0 6px; color: #9aa0b5; font-size: 13px; }
-  label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #9aa0b5; }
+  .sub { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
+  label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
   input {
-    padding: 9px 11px; border-radius: 8px; border: 1px solid #3a3f55;
-    background: #1f2230; color: #e8e8ef; font-size: 14px;
+    padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border2);
+    background: var(--input); color: var(--text); font-size: 14px;
   }
   .primary {
-    padding: 10px 14px; border: none; border-radius: 8px; background: #4f46e5;
+    padding: 10px 14px; border: none; border-radius: 8px; background: var(--accent);
     color: #fff; font-weight: 700; cursor: pointer;
   }
   .primary:disabled { opacity: 0.6; cursor: default; }
-  .gear { align-self: flex-start; background: none; border: none; color: #9aa0b5; cursor: pointer; font-size: 12px; padding: 0; }
+  .gear { align-self: flex-start; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
   .error { color: #ff8a8a; font-size: 13px; margin: 4px 0; }
 
   .shell { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
   .sidebar {
-    background: #1b1d28; padding: 12px; overflow-y: auto;
+    background: var(--sidebar); padding: 12px; overflow-y: auto;
     display: flex; flex-direction: column; gap: 12px;
   }
   .account { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
   .acts { display: inline-flex; gap: 8px; align-items: center; }
-  .link { background: none; border: none; color: #7a82a8; cursor: pointer; font-size: 12px; text-decoration: underline; }
+  .link { background: none; border: none; color: var(--link); cursor: pointer; font-size: 12px; text-decoration: underline; }
   .add {
-    background: #262a3a; border: 1px dashed #3a3f55; color: #b9b2ff;
+    background: var(--hover); border: 1px dashed var(--border2); color: var(--accent-soft);
     border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px;
   }
-  .add:hover { background: #2c3046; }
-  .ws-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7193; margin-bottom: 6px; }
+  .add:hover { filter: brightness(1.1); }
+  .ws-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); margin-bottom: 6px; }
 
   .srow-wrap { display: flex; align-items: center; }
   .srow {
     display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0;
     padding: 7px 8px; border: none; border-radius: 8px; background: none;
-    color: #d6d9e6; cursor: pointer; text-align: left; font-size: 14px;
+    color: var(--text2); cursor: pointer; text-align: left; font-size: 14px;
   }
-  .srow:hover { background: #262a3a; }
-  .srow.active { background: #4f46e5; color: #fff; }
+  .srow:hover { background: var(--hover); }
+  .srow.active { background: var(--accent); color: #fff; }
   .srow.disabled { opacity: 0.45; }
   .srow img, .srow .dot { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex: none; }
-  .srow .dot { display: grid; place-items: center; background: #3a3f55; font-size: 12px; font-weight: 700; }
+  .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
   .srow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cog { background: none; border: none; color: #5b628a; cursor: pointer; font-size: 13px; opacity: 0; padding: 4px; }
+  .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 13px; opacity: 0; padding: 4px; }
   .srow-wrap:hover .cog { opacity: 1; }
-  .cog:hover { color: #b9b2ff; }
-  .count { margin-top: auto; font-size: 11px; color: #6b7193; }
+  .cog:hover { color: var(--accent-soft); }
+  .appcog {
+    margin-top: auto; background: var(--hover); border: 1px solid var(--border);
+    color: var(--text2); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px;
+  }
+  .appcog:hover { filter: brightness(1.1); }
+  .count { font-size: 11px; color: var(--muted2); }
 
   .stage { display: grid; place-items: center; overflow: auto; }
-  .placeholder { text-align: center; color: #9aa0b5; }
+  .placeholder { text-align: center; color: var(--muted); }
   .panel {
     width: min(560px, 90%); align-self: start; margin: 40px auto;
-    background: #232633; border: 1px solid #2f3445; border-radius: 14px; padding: 22px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px;
     display: flex; flex-direction: column; gap: 14px;
   }
   .panel-head { display: flex; justify-content: space-between; align-items: center; }
   .panel-head h2 { margin: 0; font-size: 18px; }
-  .recipe { color: #b9b2ff; font-size: 12px; }
-  .row-toggle { flex-direction: row; align-items: center; gap: 10px; color: #d6d9e6; font-size: 14px; cursor: pointer; }
+  .recipe { color: var(--accent-soft); font-size: 12px; }
+  .setblock { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .set-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); }
+  .row-toggle { flex-direction: row; align-items: center; gap: 10px; color: var(--text2); font-size: 14px; cursor: pointer; }
   .row-toggle input { width: auto; }
+  .select {
+    margin-left: auto; padding: 6px 9px; border-radius: 8px;
+    border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px;
+  }
   .block { gap: 6px; }
   .danger { margin-top: 6px; background: #3a2330; border: 1px solid #6e2b3e; color: #ff9aa8; border-radius: 8px; padding: 9px; cursor: pointer; }
-  .danger:hover { background: #46283a; }
+  .danger:hover { filter: brightness(1.15); }
   .results { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
   .result {
     display: flex; justify-content: space-between; align-items: center;
-    background: #1f2230; border: 1px solid #2f3445; border-radius: 8px;
-    padding: 9px 11px; cursor: pointer; color: #e8e8ef; text-align: left;
+    background: var(--input); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; cursor: pointer; color: var(--text); text-align: left;
   }
-  .result:hover { background: #262a3a; border-color: #4f46e5; }
+  .result:hover { background: var(--hover); border-color: var(--accent); }
   .result-icon { width: 22px; height: 22px; border-radius: 5px; flex: none; }
   .result-name { flex: 1; }
-  .result-id { color: #6b7193; font-size: 12px; }
+  .result-id { color: var(--muted2); font-size: 12px; }
 </style>

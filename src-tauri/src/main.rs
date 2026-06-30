@@ -12,7 +12,7 @@ use base64::Engine;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -21,6 +21,7 @@ use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, RunEvent, State, Url, WebviewUrl, WindowEvent,
     Wry,
 };
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 // User-agent pour les appels API serveur Ferdium / récupération des recipes.
@@ -762,6 +763,74 @@ fn start_badge_poller(app: AppHandle) {
     });
 }
 
+// --- Réglages app (app_settings.json) -----------------------------------
+
+fn app_settings_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("app_settings.json"))
+}
+
+fn read_app_settings_value(app: &AppHandle) -> Value {
+    let mut v = serde_json::json!({
+        "autostart": false,
+        "startMinimized": false,
+        "theme": "system"
+    });
+    if let Some(p) = app_settings_path(app) {
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            if let Ok(stored) = serde_json::from_str::<Value>(&text) {
+                if let (Some(base), Some(obj)) = (v.as_object_mut(), stored.as_object()) {
+                    for (k, val) in obj {
+                        base.insert(k.clone(), val.clone());
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+#[tauri::command]
+fn get_app_settings(app: AppHandle) -> Value {
+    let mut v = read_app_settings_value(&app);
+    // Reflète l'état réel de l'autostart (géré par le plugin).
+    if let Ok(enabled) = app.autolaunch().is_enabled() {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("autostart".into(), Value::Bool(enabled));
+        }
+    }
+    v
+}
+
+#[tauri::command]
+fn set_app_settings(app: AppHandle, patch: Value) -> Result<Value, String> {
+    // Effet de bord : autostart via le plugin.
+    if let Some(enabled) = patch.get("autostart").and_then(Value::as_bool) {
+        let res = if enabled {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        res.map_err(|e| format!("Autostart : {e}"))?;
+    }
+    // Fusionne + persiste.
+    let mut v = read_app_settings_value(&app);
+    if let (Some(base), Some(obj)) = (v.as_object_mut(), patch.as_object()) {
+        for (k, val) in obj {
+            base.insert(k.clone(), val.clone());
+        }
+    }
+    if let Some(p) = app_settings_path(&app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&p, v.to_string());
+    }
+    Ok(v)
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_window("main") {
         let _ = w.show();
@@ -783,6 +852,10 @@ fn toggle_main(app: &AppHandle) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -836,6 +909,17 @@ fn main() {
                     let _ = app.notification().request_permission();
                 }
             }
+            // « Démarrer en arrière-plan » : on cache la fenêtre au lancement.
+            if read_app_settings_value(&app.handle())
+                .get("startMinimized")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                if let Some(w) = app.get_window("main") {
+                    let _ = w.hide();
+                }
+            }
+
             start_badge_poller(app.handle().clone());
             Ok(())
         })
@@ -853,7 +937,9 @@ fn main() {
             update_service,
             create_service,
             delete_service,
-            list_recipes
+            list_recipes,
+            get_app_settings,
+            set_app_settings
         ])
         .build(tauri::generate_context!())
         .expect("erreur au lancement de l'application tauri")
