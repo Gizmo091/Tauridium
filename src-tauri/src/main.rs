@@ -18,6 +18,7 @@ use tauri::webview::WebviewBuilder;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent, Wry,
 };
+use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 // User-agent pour les appels API serveur Ferdium / récupération des recipes.
 const API_UA: &str = concat!("pakeFerdium/", env!("CARGO_PKG_VERSION"));
@@ -366,6 +367,27 @@ const IPC_SHIM_JS: &str = r#"(function(){
     apply();
     var n = 0, iv = setInterval(function(){ apply(); if (++n > 120) clearInterval(iv); }, 25);
   })();
+  // Intercepte l'API web Notification (WKWebView ne la gère pas vraiment) : on empile
+  // les notifs des services, drainées par le poller Rust -> notif système native.
+  (function(){
+    window.__pakeNotifQueue = window.__pakeNotifQueue || [];
+    function N(title, options){
+      options = options || {};
+      try { window.__pakeNotifQueue.push({
+        title: String(title == null ? '' : title),
+        body: String(options.body == null ? '' : options.body)
+      }); } catch(e){}
+      this.title = title; this.body = options.body;
+      this.onclick = this.onclose = this.onerror = this.onshow = null;
+    }
+    N.prototype.close = function(){};
+    N.prototype.addEventListener = function(t, cb){ this['on' + t] = cb; };
+    N.prototype.removeEventListener = function(){};
+    N.prototype.dispatchEvent = function(){ return true; };
+    N.permission = 'granted';
+    N.requestPermission = function(cb){ if (typeof cb === 'function') cb('granted'); return Promise.resolve('granted'); };
+    try { window.Notification = N; } catch(e){}
+  })();
   var noop = function(){};
   // Capte les non-lus que les services Electron-aware émettent via sendToHost.
   function captureUnread(channel){
@@ -551,13 +573,33 @@ fn start_badge_poller(app: AppHandle) {
             };
             let app2 = app.clone();
             let _ = wv.eval_with_callback(
-                "String(Math.max(0, parseInt(window.__pakeUnread)||0))",
+                "(function(){return {u: Math.max(0, parseInt(window.__pakeUnread)||0), n: (window.__pakeNotifQueue||[]).splice(0)};})()",
                 move |res| {
-                    let n = res.trim().trim_matches('"').parse::<i64>().unwrap_or(0);
+                    let v: serde_json::Value =
+                        serde_json::from_str(&res).unwrap_or(serde_json::Value::Null);
+                    let unread = v.get("u").and_then(|x| x.as_i64()).unwrap_or(0);
+
+                    // Notifications natives (file drainée par le splice ci-dessus).
+                    if let Some(arr) = v.get("n").and_then(|x| x.as_array()) {
+                        for notif in arr {
+                            let title = notif.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
+                            let body = notif.get("body").and_then(|x| x.as_str()).unwrap_or("");
+                            if title.is_empty() && body.is_empty() {
+                                continue;
+                            }
+                            let _ = app2
+                                .notification()
+                                .builder()
+                                .title(if title.is_empty() { "Message" } else { title })
+                                .body(body)
+                                .show();
+                        }
+                    }
+
                     let total = {
                         let st = app2.state::<AppState>();
                         let mut m = st.unread.lock().unwrap();
-                        m.insert(sid.clone(), n);
+                        m.insert(sid.clone(), unread);
                         m.values().sum::<i64>()
                     };
                     if let Some(win) = app2.get_window("main") {
@@ -571,6 +613,7 @@ fn start_badge_poller(app: AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -580,6 +623,14 @@ fn main() {
                         reposition_active(&handle);
                     }
                 });
+            }
+            // Demande l'autorisation de notifier au lancement.
+            // NB : no-op sur macOS desktop (l'OS gère l'autorisation lui-même) ; réel
+            // sur mobile / Windows / build .app signée.
+            if let Ok(state) = app.notification().permission_state() {
+                if state != PermissionState::Granted {
+                    let _ = app.notification().request_permission();
+                }
             }
             start_badge_poller(app.handle().clone());
             Ok(())
