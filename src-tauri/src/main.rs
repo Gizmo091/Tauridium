@@ -14,9 +14,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewBuilder;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent, Wry,
+    AppHandle, LogicalPosition, LogicalSize, Manager, RunEvent, State, Url, WebviewUrl, WindowEvent,
+    Wry,
 };
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
@@ -611,6 +614,24 @@ fn start_badge_poller(app: AppHandle) {
     });
 }
 
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_main(app: &AppHandle) {
+    if let Some(w) = app.get_window("main") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -618,12 +639,47 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             if let Some(win) = app.get_window("main") {
-                win.on_window_event(move |event| {
-                    if matches!(event, WindowEvent::Resized(_)) {
-                        reposition_active(&handle);
+                win.on_window_event(move |event| match event {
+                    WindowEvent::Resized(_) => reposition_active(&handle),
+                    WindowEvent::CloseRequested { api, .. } => {
+                        // close-to-tray : on cache la fenêtre au lieu de quitter l'app.
+                        api.prevent_close();
+                        if let Some(w) = handle.get_window("main") {
+                            let _ = w.hide();
+                        }
                     }
+                    _ => {}
                 });
             }
+
+            // Icône menubar (tray) : afficher / quitter ; clic gauche = toggle fenêtre.
+            let show = MenuItem::with_id(app, "show", "Afficher Tauridium", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("Tauridium")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        toggle_main(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
+
             // Demande l'autorisation de notifier au lancement.
             // NB : no-op sur macOS desktop (l'OS gère l'autorisation lui-même) ; réel
             // sur mobile / Windows / build .app signée.
@@ -645,6 +701,12 @@ fn main() {
             close_services,
             logout
         ])
-        .run(tauri::generate_context!())
-        .expect("erreur au lancement de l'application tauri");
+        .build(tauri::generate_context!())
+        .expect("erreur au lancement de l'application tauri")
+        .run(|app, event| {
+            // Clic sur l'icône du dock (macOS) -> réafficher la fenêtre.
+            if let RunEvent::Reopen { .. } = event {
+                show_main(app);
+            }
+        });
 }
