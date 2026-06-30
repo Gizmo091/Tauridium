@@ -1,0 +1,25 @@
+[package]
+name = "pakeferdium"
+version = "0.1.0"
+edition = "2021"
+description = "pakeFerdium — spike Phase 0 : validation isolation multi-webview Tauri v2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+[[bin]]
+name = "pakeferdium"
+path = "src/main.rs"
+
+# wry patché : window.ipc mutable pour injecter le shim IPC Electron (cf. Synology Chat).
+# Voir vendor/wry/src/wkwebview/mod.rs. À ré-appliquer en cas de montée de version de wry.
+[patch.crates-io]
+wry = { path = "../vendor/wry" }
