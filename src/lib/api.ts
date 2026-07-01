@@ -114,6 +114,22 @@ export function listRecipes(): Promise<RecipePreview[]> {
   return invoke("list_recipes");
 }
 
+export function createWorkspace(name: string): Promise<Workspace> {
+  return invoke("create_workspace", { name });
+}
+
+export function updateWorkspace(
+  workspaceId: string,
+  name: string,
+  services: string[],
+): Promise<Workspace> {
+  return invoke("update_workspace", { workspaceId, name, services });
+}
+
+export function deleteWorkspace(workspaceId: string): Promise<void> {
+  return invoke("delete_workspace", { workspaceId });
+}
+
 export interface AppSettings {
   autostart: boolean;
   startMinimized: boolean;

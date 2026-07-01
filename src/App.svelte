@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import {
     login,
     restoreSession,
@@ -15,6 +16,9 @@
     createService,
     deleteService,
     listRecipes,
+    createWorkspace,
+    updateWorkspace,
+    deleteWorkspace,
     getAppSettings,
     setAppSettings,
     DEFAULT_SERVER,
@@ -38,11 +42,14 @@
   let services = $state<Service[]>([]);
   let workspaces = $state<Workspace[]>([]);
   let activeId = $state<string | null>(null);
+  let unreadMap = $state<Record<string, number>>({});
+  let activeWorkspace = $state<string | null>(null);
 
   // Vue de la zone droite : un service, réglages d'un service, ajout, réglages app.
-  type View = "service" | "svcSettings" | "add" | "appSettings";
+  type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
   let view = $state<View>("service");
   let settingsSvc = $state<Service | null>(null);
+  let newWorkspaceName = $state("");
 
   let appSettings = $state<AppSettings>({
     autostart: false,
@@ -73,9 +80,14 @@
   const sorted = $derived(
     [...services].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
   );
-  const unassigned = $derived(
-    sorted.filter((s) => !workspaces.some((w) => w.services.includes(s.id))),
-  );
+  const visibleServices = $derived.by(() => {
+    if (activeWorkspace) {
+      const ws = workspaces.find((w) => w.id === activeWorkspace);
+      const ids = new Set(ws?.services ?? []);
+      return sorted.filter((s) => ids.has(s.id));
+    }
+    return sorted;
+  });
 
   const darkMq =
     typeof window !== "undefined"
@@ -86,6 +98,10 @@
     // Suit l'apparence du système quand le thème est sur « système ».
     darkMq?.addEventListener("change", () => {
       if (appSettings.theme === "system") applyTheme();
+    });
+    // Non-lus par service (émis par le poller Rust) -> pastilles sidebar.
+    listen<Record<string, number>>("unread", (e) => {
+      unreadMap = e.payload;
     });
     try {
       appSettings = await getAppSettings();
@@ -196,6 +212,67 @@
     }
   }
 
+  function openWorkspaces() {
+    view = "workspaces";
+    newWorkspaceName = "";
+    hideServices();
+  }
+
+  async function reloadWorkspaces() {
+    workspaces = await getWorkspaces();
+  }
+
+  async function handleCreateWorkspace() {
+    const name = newWorkspaceName.trim();
+    if (!name) return;
+    try {
+      await createWorkspace(name);
+      newWorkspaceName = "";
+      await reloadWorkspaces();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function toggleServiceInWorkspace(
+    ws: Workspace,
+    serviceId: string,
+    member: boolean,
+  ) {
+    const set = new Set(ws.services);
+    if (member) set.add(serviceId);
+    else set.delete(serviceId);
+    const list = [...set];
+    const idx = workspaces.findIndex((w) => w.id === ws.id);
+    if (idx >= 0) workspaces[idx].services = list;
+    try {
+      await updateWorkspace(ws.id, ws.name, list);
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function renameWorkspace(ws: Workspace, name: string) {
+    if (!name.trim() || name === ws.name) return;
+    try {
+      await updateWorkspace(ws.id, name.trim(), ws.services);
+      await reloadWorkspaces();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function handleDeleteWorkspace(ws: Workspace) {
+    if (!confirm(`Supprimer le workspace « ${ws.name} » ?`)) return;
+    try {
+      await deleteWorkspace(ws.id);
+      if (activeWorkspace === ws.id) activeWorkspace = null;
+      await reloadWorkspaces();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   async function openAdd() {
     view = "add";
     recipeQuery = "";
@@ -299,24 +376,23 @@
 
       <button class="add" onclick={openAdd}>＋ Ajouter un service</button>
 
-      {#each workspaces as ws (ws.id)}
-        {@const list = ws.services
-          .map((sid) => sorted.find((s) => s.id === sid))
-          .filter((s): s is Service => !!s)}
-        {#if list.length}
-          <div class="ws">
-            <div class="ws-title">{ws.name}</div>
-            {#each list as s (s.id)}{@render row(s)}{/each}
-          </div>
-        {/if}
-      {/each}
+      <div class="wspills">
+        <button
+          class="pill"
+          class:on={activeWorkspace === null}
+          onclick={() => (activeWorkspace = null)}>Tous</button>
+        {#each workspaces as w (w.id)}
+          <button
+            class="pill"
+            class:on={activeWorkspace === w.id}
+            onclick={() => (activeWorkspace = w.id)}>{w.name}</button>
+        {/each}
+        <button class="pill mng" onclick={openWorkspaces} title="Gérer les workspaces">⚙</button>
+      </div>
 
-      {#if unassigned.length}
-        <div class="ws">
-          <div class="ws-title">Sans workspace</div>
-          {#each unassigned as s (s.id)}{@render row(s)}{/each}
-        </div>
-      {/if}
+      <div class="svclist">
+        {#each visibleServices as s (s.id)}{@render row(s)}{/each}
+      </div>
 
       <button class="appcog" onclick={openAppSettings}>⚙ Réglages</button>
       <div class="count">{services.length} services · {workspaces.length} workspaces</div>
@@ -437,6 +513,48 @@
 
           {#if error}<p class="error">{error}</p>{/if}
         </div>
+      {:else if view === "workspaces"}
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Workspaces</h2>
+            <button class="link" onclick={backToService}>✕ fermer</button>
+          </div>
+
+          <div class="searchrow">
+            <input bind:value={newWorkspaceName} placeholder="Nom du nouveau workspace" />
+            <button class="primary" onclick={handleCreateWorkspace}>Créer</button>
+          </div>
+          {#if error}<p class="error">{error}</p>{/if}
+
+          {#each workspaces as ws (ws.id)}
+            <div class="wsedit">
+              <div class="wsedit-head">
+                <input
+                  class="wsname"
+                  value={ws.name}
+                  onblur={(e) => renameWorkspace(ws, e.currentTarget.value)}
+                />
+                <button class="link" onclick={() => handleDeleteWorkspace(ws)}>supprimer</button>
+              </div>
+              <div class="set-title">Services de ce workspace</div>
+              <div class="wsservices">
+                {#each sorted as s (s.id)}
+                  <label class="row-toggle">
+                    <input
+                      type="checkbox"
+                      checked={ws.services.includes(s.id)}
+                      onchange={(e) =>
+                        toggleServiceInWorkspace(ws, s.id, e.currentTarget.checked)}
+                    />
+                    <span>{s.name}</span>
+                  </label>
+                {/each}
+              </div>
+            </div>
+          {:else}
+            <p class="sub">Aucun workspace. Crée-en un ci-dessus.</p>
+          {/each}
+        </div>
       {/if}
     </section>
   </div>
@@ -456,6 +574,11 @@
         <span class="dot">{s.name.slice(0, 1)}</span>
       {/if}
       <span class="srow-name">{s.name}</span>
+      {#if (unreadMap[s.id] ?? 0) > 0}
+        <span class="ubadge" class:muted={s.isMuted === true}>
+          {unreadMap[s.id] > 99 ? "99+" : unreadMap[s.id]}
+        </span>
+      {/if}
     </button>
     <button class="cog" title="Réglages" onclick={() => openServiceSettings(s)}>⚙</button>
   </div>
@@ -526,6 +649,19 @@
   }
   .add:hover { filter: brightness(1.1); }
   .ws-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); margin-bottom: 6px; }
+  .wspills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pill {
+    background: var(--hover); border: none; color: var(--muted);
+    border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px;
+  }
+  .pill.on { background: var(--accent); color: #fff; }
+  .svclist { display: flex; flex-direction: column; gap: 2px; }
+  .ubadge {
+    background: #e23b3b; color: #fff; font-size: 11px; font-weight: 700;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ubadge.muted { background: var(--muted2); }
 
   .srow-wrap { display: flex; align-items: center; }
   .srow {
@@ -538,7 +674,7 @@
   .srow.disabled { opacity: 0.45; }
   .srow img, .srow .dot { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex: none; }
   .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
-  .srow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 13px; opacity: 0; padding: 4px; }
   .srow-wrap:hover .cog { opacity: 1; }
   .cog:hover { color: var(--accent-soft); }
@@ -567,6 +703,16 @@
     margin-left: auto; padding: 6px 9px; border-radius: 8px;
     border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px;
   }
+  .searchrow { display: flex; gap: 8px; }
+  .searchrow input { flex: 1; }
+  .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); }
+  .wsedit {
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--input);
+  }
+  .wsedit-head { display: flex; gap: 10px; align-items: center; }
+  .wsname { flex: 1; }
+  .wsservices { display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow-y: auto; }
   .block { gap: 6px; }
   .danger { margin-top: 6px; background: #3a2330; border: 1px solid #6e2b3e; color: #ff9aa8; border-radius: 8px; padding: 9px; cursor: pointer; }
   .danger:hover { filter: brightness(1.15); }

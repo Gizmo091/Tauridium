@@ -18,8 +18,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewBuilder;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, RunEvent, State, Url, WebviewUrl, WindowEvent,
-    Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, State, Url, WebviewUrl,
+    WindowEvent, Wry,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
@@ -673,6 +673,63 @@ async fn list_recipes(state: State<'_, AppState>) -> Result<Value, String> {
     res.json().await.map_err(|e| e.to_string())
 }
 
+// --- Workspaces -----------------------------------------------------------
+
+#[tauri::command]
+async fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Value, String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .post(format!("{base}/v1/workspace"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Création du workspace : HTTP {}", res.status()));
+    }
+    res.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_workspace(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    name: String,
+    services: Vec<String>,
+) -> Result<Value, String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .put(format!("{base}/v1/workspace/{workspace_id}"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .json(&serde_json::json!({ "name": name, "services": services }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Modification du workspace : HTTP {}", res.status()));
+    }
+    res.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<(), String> {
+    let (base, token) = current(&state)?;
+    let res = reqwest::Client::new()
+        .delete(format!("{base}/v1/workspace/{workspace_id}"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("Suppression du workspace : HTTP {}", res.status()));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn logout(app: AppHandle, state: State<'_, AppState>) {
     *state.server.lock().unwrap() = None;
@@ -717,14 +774,8 @@ fn start_badge_poller(app: AppHandle) {
                     let v: serde_json::Value =
                         serde_json::from_str(&res).unwrap_or(serde_json::Value::Null);
                     let unread = v.get("u").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let flags = app2
-                        .state::<AppState>()
-                        .flags
-                        .lock()
-                        .unwrap()
-                        .get(&sid)
-                        .copied()
-                        .unwrap_or_default();
+                    let st = app2.state::<AppState>();
+                    let flags = st.flags.lock().unwrap().get(&sid).copied().unwrap_or_default();
 
                     // Notifications : on respecte mute / notifications désactivées.
                     if flags.notif && !flags.muted {
@@ -746,14 +797,26 @@ fn start_badge_poller(app: AppHandle) {
                         }
                     }
 
-                    // Badge : contribution nulle si badge désactivé ou service muté.
-                    let contribution = if flags.badge && !flags.muted { unread } else { 0 };
-                    let total = {
-                        let st = app2.state::<AppState>();
+                    // Stocke le brut par service (pour la sidebar), calcule le total dock
+                    // (flags appliqués) et émet la carte des non-lus vers le shell.
+                    let (map, total) = {
                         let mut m = st.unread.lock().unwrap();
-                        m.insert(sid.clone(), contribution);
-                        m.values().sum::<i64>()
+                        m.insert(sid.clone(), unread);
+                        let f = st.flags.lock().unwrap();
+                        let total: i64 = m
+                            .iter()
+                            .map(|(id, &u)| {
+                                let fl = f.get(id).copied().unwrap_or_default();
+                                if fl.badge && !fl.muted {
+                                    u
+                                } else {
+                                    0
+                                }
+                            })
+                            .sum();
+                        (m.clone(), total)
                     };
+                    let _ = app2.emit("unread", &map);
                     if let Some(win) = app2.get_window("main") {
                         let _ = win.set_badge_count(if total > 0 { Some(total) } else { None });
                     }
@@ -938,6 +1001,9 @@ fn main() {
             create_service,
             delete_service,
             list_recipes,
+            create_workspace,
+            update_workspace,
+            delete_workspace,
             get_app_settings,
             set_app_settings
         ])
