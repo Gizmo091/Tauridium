@@ -17,9 +17,11 @@ use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewBuilder;
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, State, Url, WebviewUrl,
-    WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent,
+    Wry,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
@@ -1272,10 +1274,12 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("erreur au lancement de l'application tauri")
-        .run(|app, event| {
+        .run(|_app, _event| {
             // Clic sur l'icône du dock (macOS) -> réafficher la fenêtre.
-            if let RunEvent::Reopen { .. } = event {
-                show_main(app);
+            // RunEvent::Reopen n'existe que sur macOS -> gate pour compiler ailleurs.
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen { .. } = _event {
+                show_main(_app);
             }
         });
 }
