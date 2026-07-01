@@ -134,6 +134,13 @@ export interface AppSettings {
   autostart: boolean;
   startMinimized: boolean;
   theme: "dark" | "light" | "system";
+  accentColor: string;
+  closeToSystemTray: boolean;
+  privateNotifications: boolean;
+  showDisabledServices: boolean;
+  showServiceName: boolean;
+  showMessageBadgeWhenMuted: boolean;
+  userAgentPref: string;
   [k: string]: unknown;
 }
 

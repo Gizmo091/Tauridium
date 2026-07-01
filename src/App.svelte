@@ -45,34 +45,32 @@
   let unreadMap = $state<Record<string, number>>({});
   let activeWorkspace = $state<string | null>(null);
 
-  // Vue de la zone droite : un service, réglages d'un service, ajout, réglages app.
   type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
   let view = $state<View>("service");
   let settingsSvc = $state<Service | null>(null);
   let newWorkspaceName = $state("");
 
+  type Tab = "general" | "services" | "appearance" | "privacy" | "advanced";
+  let settingsTab = $state<Tab>("general");
+
   let appSettings = $state<AppSettings>({
     autostart: false,
     startMinimized: false,
     theme: "system",
+    accentColor: "#4f46e5",
+    closeToSystemTray: true,
+    privateNotifications: false,
+    showDisabledServices: true,
+    showServiceName: true,
+    showMessageBadgeWhenMuted: true,
+    userAgentPref: "",
   });
 
-  // Ajout de service : catalogue complet chargé une fois, filtré en live.
+  // Add service: full catalog loaded once, filtered live.
   let recipeQuery = $state("");
   let allRecipes = $state<RecipePreview[]>([]);
   let recipesLoading = $state(false);
   let newServiceName = $state("");
-
-  const filteredRecipes = $derived.by(() => {
-    const q = recipeQuery.trim().toLowerCase();
-    const list = q
-      ? allRecipes.filter(
-          (r) =>
-            r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q),
-        )
-      : allRecipes;
-    return [...list].sort((a, b) => a.name.localeCompare(b.name));
-  });
 
   const activeService = $derived(
     services.find((s) => s.id === activeId) ?? null,
@@ -81,12 +79,16 @@
     [...services].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
   );
   const visibleServices = $derived.by(() => {
+    let list = sorted;
     if (activeWorkspace) {
       const ws = workspaces.find((w) => w.id === activeWorkspace);
       const ids = new Set(ws?.services ?? []);
-      return sorted.filter((s) => ids.has(s.id));
+      list = list.filter((s) => ids.has(s.id));
     }
-    return sorted;
+    if (!appSettings.showDisabledServices) {
+      list = list.filter((s) => s.isEnabled);
+    }
+    return list;
   });
 
   const darkMq =
@@ -95,11 +97,9 @@
       : null;
 
   onMount(async () => {
-    // Suit l'apparence du système quand le thème est sur « système ».
     darkMq?.addEventListener("change", () => {
       if (appSettings.theme === "system") applyTheme();
     });
-    // Non-lus par service (émis par le poller Rust) -> pastilles sidebar.
     listen<Record<string, number>>("unread", (e) => {
       unreadMap = e.payload;
     });
@@ -107,13 +107,13 @@
       appSettings = await getAppSettings();
       applyTheme();
     } catch {
-      /* défauts */
+      /* defaults */
     }
     try {
       me = await restoreSession();
       await loadAfterAuth();
     } catch {
-      // pas de session valide -> écran de login
+      // no valid session -> login screen
     } finally {
       booting = false;
     }
@@ -124,29 +124,11 @@
       appSettings.theme === "dark" ||
       (appSettings.theme === "system" && (darkMq?.matches ?? true));
     document.body.classList.toggle("light", !dark);
-  }
-
-  function openAppSettings() {
-    view = "appSettings";
-    hideServices();
-  }
-
-  async function saveAppSetting(key: keyof AppSettings, value: unknown) {
-    (appSettings as Record<string, unknown>)[key] = value;
-    if (key === "theme") applyTheme();
-    try {
-      appSettings = await setAppSettings({
-        [key]: value,
-      } as Partial<AppSettings>);
-      applyTheme();
-    } catch (err) {
-      error = String(err);
-    }
+    document.body.style.setProperty("--accent", appSettings.accentColor);
   }
 
   async function loadAfterAuth() {
     [services, workspaces] = await Promise.all([getServices(), getWorkspaces()]);
-    // Pousse les réglages (notif/mute/badge) au backend pour qu'il les respecte.
     await Promise.all(services.map((s) => setServiceFlags(s).catch(() => {})));
     const first = sorted.find((s) => s.isEnabled) ?? sorted[0] ?? null;
     if (first) selectService(first);
@@ -171,7 +153,7 @@
     view = "service";
     activeId = s.id;
     showService(s).catch((err) => {
-      error = `Service « ${s.name} » : ${err}`;
+      error = `Service "${s.name}": ${err}`;
     });
   }
 
@@ -202,7 +184,7 @@
   }
 
   async function handleDelete(s: Service) {
-    if (!confirm(`Supprimer le service « ${s.name} » ?`)) return;
+    if (!confirm(`Delete service "${s.name}"?`)) return;
     try {
       await deleteService(s.id);
       services = services.filter((x) => x.id !== s.id);
@@ -263,7 +245,7 @@
   }
 
   async function handleDeleteWorkspace(ws: Workspace) {
-    if (!confirm(`Supprimer le workspace « ${ws.name} » ?`)) return;
+    if (!confirm(`Delete workspace "${ws.name}"?`)) return;
     try {
       await deleteWorkspace(ws.id);
       if (activeWorkspace === ws.id) activeWorkspace = null;
@@ -291,6 +273,17 @@
     }
   }
 
+  const filteredRecipes = $derived.by(() => {
+    const q = recipeQuery.trim().toLowerCase();
+    const list = q
+      ? allRecipes.filter(
+          (r) =>
+            r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q),
+        )
+      : allRecipes;
+    return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  });
+
   async function pickRecipe(r: RecipePreview) {
     try {
       await createService(newServiceName.trim() || r.name, r.id);
@@ -303,6 +296,24 @@
         sorted.find((s) => s.recipeId === r.id) ?? sorted.at(-1) ?? null;
       if (created) selectService(created);
       else view = "service";
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  function openAppSettings() {
+    view = "appSettings";
+    hideServices();
+  }
+
+  async function saveAppSetting(key: keyof AppSettings, value: unknown) {
+    (appSettings as Record<string, unknown>)[key] = value;
+    if (key === "theme" || key === "accentColor") applyTheme();
+    try {
+      appSettings = await setAppSettings({
+        [key]: value,
+      } as Partial<AppSettings>);
+      applyTheme();
     } catch (err) {
       error = String(err);
     }
@@ -328,19 +339,19 @@
 
 {#if booting}
   <main class="login">
-    <div class="card"><p class="sub">Restauration de la session…</p></div>
+    <div class="card"><p class="sub">Restoring session…</p></div>
   </main>
 {:else if !me}
   <main class="login">
     <form class="card" onsubmit={handleLogin}>
       <h1>Tauridium</h1>
-      <p class="sub">Client Ferdium léger — connexion à ton serveur</p>
+      <p class="sub">Lightweight Ferdium client — sign in to your server</p>
       <label>
-        E-mail
+        Email
         <input type="email" bind:value={email} autocomplete="username" required />
       </label>
       <label>
-        Mot de passe
+        Password
         <input
           type="password"
           bind:value={password}
@@ -349,17 +360,17 @@
         />
       </label>
       <button type="button" class="gear" onclick={() => (showServer = !showServer)}>
-        ⚙︎ Serveur {showServer ? "▲" : "▼"}
+        ⚙︎ Server {showServer ? "▲" : "▼"}
       </button>
       {#if showServer}
         <label>
-          URL du serveur
+          Server URL
           <input type="url" bind:value={server} placeholder={DEFAULT_SERVER} />
         </label>
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
       <button class="primary" type="submit" disabled={loading}>
-        {loading ? "Connexion…" : "Se connecter"}
+        {loading ? "Signing in…" : "Sign in"}
       </button>
     </form>
   </main>
@@ -369,32 +380,32 @@
       <div class="account">
         <strong>{me.firstname || me.email}</strong>
         <span class="acts">
-          <button class="link" onclick={() => inspectService()} title="Inspecter (devtools)">🐞</button>
-          <button class="link" onclick={handleLogout}>déconnexion</button>
+          <button class="link" onclick={() => inspectService()} title="Inspect (devtools)">🐞</button>
+          <button class="link" onclick={handleLogout}>sign out</button>
         </span>
       </div>
 
-      <button class="add" onclick={openAdd}>＋ Ajouter un service</button>
+      <button class="add" onclick={openAdd}>＋ Add a service</button>
 
       <div class="wspills">
         <button
           class="pill"
           class:on={activeWorkspace === null}
-          onclick={() => (activeWorkspace = null)}>Tous</button>
+          onclick={() => (activeWorkspace = null)}>All</button>
         {#each workspaces as w (w.id)}
           <button
             class="pill"
             class:on={activeWorkspace === w.id}
             onclick={() => (activeWorkspace = w.id)}>{w.name}</button>
         {/each}
-        <button class="pill mng" onclick={openWorkspaces} title="Gérer les workspaces">⚙</button>
+        <button class="pill mng" onclick={openWorkspaces} title="Manage workspaces">⚙</button>
       </div>
 
       <div class="svclist">
         {#each visibleServices as s (s.id)}{@render row(s)}{/each}
       </div>
 
-      <button class="appcog" onclick={openAppSettings}>⚙ Réglages</button>
+      <button class="appcog" onclick={openAppSettings}>⚙ Settings</button>
       <div class="count">{services.length} services · {workspaces.length} workspaces</div>
     </aside>
 
@@ -403,47 +414,47 @@
         {#if activeService}
           <div class="placeholder">
             <h2>{activeService.name}</h2>
-            <p>Chargement de la webview…</p>
+            <p>Loading webview…</p>
           </div>
         {:else}
-          <div class="placeholder"><p>Aucun service sélectionné.</p></div>
+          <div class="placeholder"><p>No service selected.</p></div>
         {/if}
       {:else if view === "svcSettings" && settingsSvc}
         <div class="panel">
           <div class="panel-head">
-            <h2>Réglages — {settingsSvc.name}</h2>
-            <button class="link" onclick={backToService}>✕ fermer</button>
+            <h2>Settings — {settingsSvc.name}</h2>
+            <button class="link" onclick={backToService}>✕ close</button>
           </div>
-          <code class="recipe">recipe : {settingsSvc.recipeId}</code>
+          <code class="recipe">recipe: {settingsSvc.recipeId}</code>
 
-          {@render toggle("Activé", "isEnabled", settingsSvc.isEnabled !== false)}
+          {@render toggle("Enabled", "isEnabled", settingsSvc.isEnabled !== false)}
           {@render toggle("Notifications", "isNotificationEnabled", settingsSvc.isNotificationEnabled !== false)}
-          {@render toggle("En sourdine (mute)", "isMuted", settingsSvc.isMuted === true)}
-          {@render toggle("Badge non-lus", "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
+          {@render toggle("Muted", "isMuted", settingsSvc.isMuted === true)}
+          {@render toggle("Unread badge", "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
 
           {#if error}<p class="error">{error}</p>{/if}
           <button class="danger" onclick={() => settingsSvc && handleDelete(settingsSvc)}>
-            Supprimer ce service
+            Delete this service
           </button>
         </div>
       {:else if view === "add"}
         <div class="panel">
           <div class="panel-head">
-            <h2>Ajouter un service</h2>
-            <button class="link" onclick={backToService}>✕ fermer</button>
+            <h2>Add a service</h2>
+            <button class="link" onclick={backToService}>✕ close</button>
           </div>
           <label class="block">
-            Nom (optionnel)
-            <input bind:value={newServiceName} placeholder="laisser vide = nom du recipe" />
+            Name (optional)
+            <input bind:value={newServiceName} placeholder="leave empty = recipe name" />
           </label>
           <input
             class="filter"
             bind:value={recipeQuery}
-            placeholder="Filtrer parmi {allRecipes.length} services…"
+            placeholder="Filter among {allRecipes.length} services…"
           />
           {#if error}<p class="error">{error}</p>{/if}
           {#if recipesLoading}
-            <p class="sub">Chargement du catalogue…</p>
+            <p class="sub">Loading catalog…</p>
           {:else}
             <div class="results">
               {#each filteredRecipes as r (r.id)}
@@ -455,74 +466,21 @@
                   <span class="result-id">{r.id}</span>
                 </button>
               {:else}
-                <p class="sub">Aucun service ne correspond.</p>
+                <p class="sub">No service matches.</p>
               {/each}
             </div>
           {/if}
-        </div>
-      {:else if view === "appSettings"}
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Réglages</h2>
-            <button class="link" onclick={backToService}>✕ fermer</button>
-          </div>
-
-          <div class="setblock">
-            <div class="set-title">Apparence</div>
-            <label class="row-toggle">
-              <span>Thème</span>
-              <select
-                class="select"
-                value={appSettings.theme}
-                onchange={(e) => saveAppSetting("theme", e.currentTarget.value)}
-              >
-                <option value="system">Système</option>
-                <option value="dark">Sombre</option>
-                <option value="light">Clair</option>
-              </select>
-            </label>
-          </div>
-
-          <div class="setblock">
-            <div class="set-title">Démarrage</div>
-            <label class="row-toggle">
-              <input
-                type="checkbox"
-                checked={appSettings.autostart}
-                onchange={(e) => saveAppSetting("autostart", e.currentTarget.checked)}
-              />
-              <span>Lancer au démarrage de la session</span>
-            </label>
-            <label class="row-toggle">
-              <input
-                type="checkbox"
-                checked={appSettings.startMinimized}
-                onchange={(e) => saveAppSetting("startMinimized", e.currentTarget.checked)}
-              />
-              <span>Démarrer en arrière-plan (fenêtre masquée)</span>
-            </label>
-          </div>
-
-          <div class="setblock">
-            <div class="set-title">Serveur</div>
-            <code class="recipe">{server}</code>
-            <p class="sub">
-              Connecté : {me.email}. Pour changer de serveur, déconnecte-toi.
-            </p>
-          </div>
-
-          {#if error}<p class="error">{error}</p>{/if}
         </div>
       {:else if view === "workspaces"}
         <div class="panel">
           <div class="panel-head">
             <h2>Workspaces</h2>
-            <button class="link" onclick={backToService}>✕ fermer</button>
+            <button class="link" onclick={backToService}>✕ close</button>
           </div>
 
           <div class="searchrow">
-            <input bind:value={newWorkspaceName} placeholder="Nom du nouveau workspace" />
-            <button class="primary" onclick={handleCreateWorkspace}>Créer</button>
+            <input bind:value={newWorkspaceName} placeholder="New workspace name" />
+            <button class="primary" onclick={handleCreateWorkspace}>Create</button>
           </div>
           {#if error}<p class="error">{error}</p>{/if}
 
@@ -534,9 +492,9 @@
                   value={ws.name}
                   onblur={(e) => renameWorkspace(ws, e.currentTarget.value)}
                 />
-                <button class="link" onclick={() => handleDeleteWorkspace(ws)}>supprimer</button>
+                <button class="link" onclick={() => handleDeleteWorkspace(ws)}>delete</button>
               </div>
-              <div class="set-title">Services de ce workspace</div>
+              <div class="set-title">Services in this workspace</div>
               <div class="wsservices">
                 {#each sorted as s (s.id)}
                   <label class="row-toggle">
@@ -552,8 +510,78 @@
               </div>
             </div>
           {:else}
-            <p class="sub">Aucun workspace. Crée-en un ci-dessus.</p>
+            <p class="sub">No workspace yet. Create one above.</p>
           {/each}
+        </div>
+      {:else if view === "appSettings"}
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Settings</h2>
+            <button class="link" onclick={backToService}>✕ close</button>
+          </div>
+
+          <div class="tabs">
+            {#each [["general", "General"], ["services", "Services"], ["appearance", "Appearance"], ["privacy", "Privacy"], ["advanced", "Advanced"]] as [id, label] (id)}
+              <button
+                class="tab"
+                class:on={settingsTab === id}
+                onclick={() => (settingsTab = id as Tab)}>{label}</button>
+            {/each}
+          </div>
+
+          {#if settingsTab === "general"}
+            {@render appToggle("Launch at login", "autostart", appSettings.autostart)}
+            {@render appToggle("Start in background (hidden window)", "startMinimized", appSettings.startMinimized)}
+            {@render appToggle("Close button hides to tray (instead of quitting)", "closeToSystemTray", appSettings.closeToSystemTray)}
+          {:else if settingsTab === "services"}
+            {@render appToggle("Show disabled services", "showDisabledServices", appSettings.showDisabledServices)}
+            {@render appToggle("Show service names", "showServiceName", appSettings.showServiceName)}
+            {@render appToggle("Unread badge on muted services", "showMessageBadgeWhenMuted", appSettings.showMessageBadgeWhenMuted)}
+          {:else if settingsTab === "appearance"}
+            <label class="row-toggle">
+              <span>Theme</span>
+              <select
+                class="select"
+                value={appSettings.theme}
+                onchange={(e) => saveAppSetting("theme", e.currentTarget.value)}
+              >
+                <option value="system">System</option>
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </label>
+            <label class="row-toggle">
+              <span>Accent color</span>
+              <span class="swatches">
+                {#each ["#4f46e5", "#2563eb", "#0891b2", "#16a34a", "#d97706", "#dc2626", "#db2777", "#7c3aed"] as c (c)}
+                  <button
+                    class="swatch"
+                    class:on={appSettings.accentColor === c}
+                    style="background:{c}"
+                    aria-label={c}
+                    onclick={() => saveAppSetting("accentColor", c)}
+                  ></button>
+                {/each}
+              </span>
+            </label>
+          {:else if settingsTab === "privacy"}
+            {@render appToggle("Private notifications (hide message content)", "privateNotifications", appSettings.privateNotifications)}
+          {:else if settingsTab === "advanced"}
+            <label class="block">
+              Custom user agent (empty = default)
+              <input
+                value={appSettings.userAgentPref}
+                placeholder="Mozilla/5.0 …"
+                onchange={(e) => saveAppSetting("userAgentPref", e.currentTarget.value)}
+              />
+            </label>
+            <p class="sub">Applies to newly opened services (restart to apply everywhere).</p>
+            <div class="set-title">Server</div>
+            <code class="recipe">{server}</code>
+            <p class="sub">Signed in as {me.email}. Sign out to change server.</p>
+          {/if}
+
+          {#if error}<p class="error">{error}</p>{/if}
         </div>
       {/if}
     </section>
@@ -573,14 +601,16 @@
       {:else}
         <span class="dot">{s.name.slice(0, 1)}</span>
       {/if}
-      <span class="srow-name">{s.name}</span>
-      {#if (unreadMap[s.id] ?? 0) > 0}
+      {#if appSettings.showServiceName}
+        <span class="srow-name">{s.name}</span>
+      {/if}
+      {#if (unreadMap[s.id] ?? 0) > 0 && (s.isMuted !== true || appSettings.showMessageBadgeWhenMuted)}
         <span class="ubadge" class:muted={s.isMuted === true}>
           {unreadMap[s.id] > 99 ? "99+" : unreadMap[s.id]}
         </span>
       {/if}
     </button>
-    <button class="cog" title="Réglages" onclick={() => openServiceSettings(s)}>⚙</button>
+    <button class="cog" title="Settings" onclick={() => openServiceSettings(s)}>⚙</button>
   </div>
 {/snippet}
 
@@ -590,6 +620,17 @@
       type="checkbox"
       {checked}
       onchange={(e) => saveSetting(key, e.currentTarget.checked)}
+    />
+    <span>{label}</span>
+  </label>
+{/snippet}
+
+{#snippet appToggle(label: string, key: keyof AppSettings, checked: boolean)}
+  <label class="row-toggle">
+    <input
+      type="checkbox"
+      {checked}
+      onchange={(e) => saveAppSetting(key, e.currentTarget.checked)}
     />
     <span>{label}</span>
   </label>
@@ -606,7 +647,7 @@
     --bg: #f3f4f8; --sidebar: #e9ebf1; --card: #ffffff; --panel: #ffffff;
     --input: #ffffff; --border: #d6dae6; --border2: #c8cddc;
     --text: #1c2030; --text2: #2a2f40; --muted: #5b6280; --muted2: #818aa6;
-    --hover: #e4e7f0; --accent: #4f46e5; --accent-soft: #5b52d6; --link: #6d75a0;
+    --hover: #e4e7f0; --accent-soft: #5b52d6; --link: #6d75a0;
   }
   :global(body) {
     margin: 0;
@@ -648,20 +689,14 @@
     border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px;
   }
   .add:hover { filter: brightness(1.1); }
-  .ws-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); margin-bottom: 6px; }
   .wspills { display: flex; flex-wrap: wrap; gap: 5px; }
   .pill {
     background: var(--hover); border: none; color: var(--muted);
     border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px;
   }
   .pill.on { background: var(--accent); color: #fff; }
+  .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); }
   .svclist { display: flex; flex-direction: column; gap: 2px; }
-  .ubadge {
-    background: #e23b3b; color: #fff; font-size: 11px; font-weight: 700;
-    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; flex: none;
-    display: inline-flex; align-items: center; justify-content: center;
-  }
-  .ubadge.muted { background: var(--muted2); }
 
   .srow-wrap { display: flex; align-items: center; }
   .srow {
@@ -675,6 +710,12 @@
   .srow img, .srow .dot { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex: none; }
   .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
   .srow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ubadge {
+    margin-left: auto; background: #e23b3b; color: #fff; font-size: 11px; font-weight: 700;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ubadge.muted { background: var(--muted2); }
   .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 13px; opacity: 0; padding: 4px; }
   .srow-wrap:hover .cog { opacity: 1; }
   .cog:hover { color: var(--accent-soft); }
@@ -695,7 +736,9 @@
   .panel-head { display: flex; justify-content: space-between; align-items: center; }
   .panel-head h2 { margin: 0; font-size: 18px; }
   .recipe { color: var(--accent-soft); font-size: 12px; }
-  .setblock { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .tab { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 5px 10px; border-radius: 8px; }
+  .tab.on { background: var(--hover); color: var(--text); }
   .set-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); }
   .row-toggle { flex-direction: row; align-items: center; gap: 10px; color: var(--text2); font-size: 14px; cursor: pointer; }
   .row-toggle input { width: auto; }
@@ -703,9 +746,13 @@
     margin-left: auto; padding: 6px 9px; border-radius: 8px;
     border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px;
   }
+  .swatches { margin-left: auto; display: inline-flex; gap: 7px; }
+  .swatch {
+    width: 22px; height: 22px; border-radius: 999px; border: none; padding: 0; cursor: pointer;
+  }
+  .swatch.on { outline: 2px solid var(--text); outline-offset: 2px; }
   .searchrow { display: flex; gap: 8px; }
   .searchrow input { flex: 1; }
-  .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); }
   .wsedit {
     display: flex; flex-direction: column; gap: 8px; padding: 12px;
     border: 1px solid var(--border); border-radius: 10px; background: var(--input);

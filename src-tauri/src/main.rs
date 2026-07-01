@@ -42,6 +42,7 @@ struct AppState {
     active: Mutex<Option<String>>,   // serviceId actuellement affiché
     unread: Mutex<HashMap<String, i64>>, // non-lus par service (pour le badge dock)
     flags: Mutex<HashMap<String, ServiceFlags>>, // réglages par service (notif/mute/badge)
+    settings: Mutex<Value>,              // cache des réglages app (lu par le poller, etc.)
 }
 
 #[derive(Clone, Copy)]
@@ -490,15 +491,28 @@ async fn show_service(
         let runtime = recipe_webview_js(&app_data, &recipe_id)
             .await
             .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
-        // UA Safari moderne (cf. SERVICE_UA) : satisfait WhatsApp (Safari >= 15) sans
-        // casser Synology (reste du Safari, pas du Chrome).
-        //
+        // UA : override utilisateur (userAgentPref) sinon SERVICE_UA (Safari moderne :
+        // satisfait WhatsApp >= 15 sans casser Synology).
+        let ua = {
+            let s = state.settings.lock().unwrap();
+            let pref = s
+                .get("userAgentPref")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if pref.is_empty() {
+                SERVICE_UA.to_string()
+            } else {
+                pref
+            }
+        };
         // Shim IPC injecté pour TOUS les services (comme Ferdium expose ipcRenderer à
         // toutes ses webviews) : ceux qui en dépendent (Synology Chat…) ne crashent plus,
         // les autres l'ignorent.
         let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
             .data_store_identifier(store)
-            .user_agent(SERVICE_UA)
+            .user_agent(&ua)
             .initialization_script(IPC_SHIM_JS);
         if let Some(rt) = runtime {
             builder = builder.initialization_script(rt);
@@ -779,6 +793,13 @@ fn start_badge_poller(app: AppHandle) {
 
                     // Notifications : on respecte mute / notifications désactivées.
                     if flags.notif && !flags.muted {
+                        let private = st
+                            .settings
+                            .lock()
+                            .unwrap()
+                            .get("privateNotifications")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         if let Some(arr) = v.get("n").and_then(|x| x.as_array()) {
                             for notif in arr {
                                 let title =
@@ -787,12 +808,14 @@ fn start_badge_poller(app: AppHandle) {
                                 if title.is_empty() && body.is_empty() {
                                     continue;
                                 }
-                                let _ = app2
-                                    .notification()
-                                    .builder()
-                                    .title(if title.is_empty() { "Message" } else { title })
-                                    .body(body)
-                                    .show();
+                                let b = app2.notification().builder();
+                                let _ = if private {
+                                    b.title("New message").show()
+                                } else {
+                                    b.title(if title.is_empty() { "Message" } else { title })
+                                        .body(body)
+                                        .show()
+                                };
                             }
                         }
                     }
@@ -839,7 +862,14 @@ fn read_app_settings_value(app: &AppHandle) -> Value {
     let mut v = serde_json::json!({
         "autostart": false,
         "startMinimized": false,
-        "theme": "system"
+        "theme": "system",
+        "accentColor": "#4f46e5",
+        "closeToSystemTray": true,
+        "privateNotifications": false,
+        "showDisabledServices": true,
+        "showServiceName": true,
+        "showMessageBadgeWhenMuted": true,
+        "userAgentPref": ""
     });
     if let Some(p) = app_settings_path(app) {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -868,7 +898,11 @@ fn get_app_settings(app: AppHandle) -> Value {
 }
 
 #[tauri::command]
-fn set_app_settings(app: AppHandle, patch: Value) -> Result<Value, String> {
+fn set_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    patch: Value,
+) -> Result<Value, String> {
     // Effet de bord : autostart via le plugin.
     if let Some(enabled) = patch.get("autostart").and_then(Value::as_bool) {
         let res = if enabled {
@@ -891,6 +925,7 @@ fn set_app_settings(app: AppHandle, patch: Value) -> Result<Value, String> {
         }
         let _ = std::fs::write(&p, v.to_string());
     }
+    *state.settings.lock().unwrap() = v.clone();
     Ok(v)
 }
 
@@ -921,15 +956,29 @@ fn main() {
         ))
         .manage(AppState::default())
         .setup(|app| {
+            // Cache des réglages app en mémoire (lu par le poller, la fermeture, etc.).
+            *app.state::<AppState>().settings.lock().unwrap() =
+                read_app_settings_value(&app.handle());
+
             let handle = app.handle().clone();
             if let Some(win) = app.get_window("main") {
                 win.on_window_event(move |event| match event {
                     WindowEvent::Resized(_) => reposition_active(&handle),
                     WindowEvent::CloseRequested { api, .. } => {
-                        // close-to-tray : on cache la fenêtre au lieu de quitter l'app.
-                        api.prevent_close();
-                        if let Some(w) = handle.get_window("main") {
-                            let _ = w.hide();
+                        // « close to tray » : on cache au lieu de quitter (sinon on quitte).
+                        let close_to_tray = handle
+                            .state::<AppState>()
+                            .settings
+                            .lock()
+                            .unwrap()
+                            .get("closeToSystemTray")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        if close_to_tray {
+                            api.prevent_close();
+                            if let Some(w) = handle.get_window("main") {
+                                let _ = w.hide();
+                            }
                         }
                     }
                     _ => {}
