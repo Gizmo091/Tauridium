@@ -1,8 +1,8 @@
 [package]
-name = "pakeferdium"
+name = "tauridium"
 version = "0.1.0"
 edition = "2021"
-description = "pakeFerdium — spike Phase 0 : validation isolation multi-webview Tauri v2"
+description = "Tauridium — lightweight Tauri client for Ferdium"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -18,7 +18,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 
 [[bin]]
-name = "pakeferdium"
+name = "tauridium"
 path = "src/main.rs"
 
 # wry patché : window.ipc mutable pour injecter le shim IPC Electron (cf. Synology Chat).

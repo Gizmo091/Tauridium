@@ -1,14 +1,16 @@
 {
-  "name": "pakeferdium",
+  "name": "tauridium",
   "version": "0.1.0",
-  "description": "Client Ferdium alternatif léger (Tauri v2)",
+  "description": "Tauridium — lightweight Tauri client for Ferdium",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
@@ -19,6 +21,7 @@
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
-    "vite": "^6"
+    "vite": "^6",
+    "vitest": "^3"
   }
 }

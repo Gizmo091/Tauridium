@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { accentFg, iconSrc, filterRecipes, snapIconSize } from "./lib/ui";
   import {
     login,
     restoreSession,
@@ -8,9 +9,9 @@
     getWorkspaces,
     logout,
     showService,
+    closeService,
     closeServices,
     hideServices,
-    inspectService,
     setServiceFlags,
     updateService,
     createService,
@@ -21,6 +22,7 @@
     deleteWorkspace,
     getAppSettings,
     setAppSettings,
+    setSidebarWidth,
     DEFAULT_SERVER,
     type MeUser,
     type Service,
@@ -43,11 +45,14 @@
   let workspaces = $state<Workspace[]>([]);
   let activeId = $state<string | null>(null);
   let unreadMap = $state<Record<string, number>>({});
+  let failedIcons = $state<Set<string>>(new Set());
   let activeWorkspace = $state<string | null>(null);
 
   type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
   let view = $state<View>("service");
   let settingsSvc = $state<Service | null>(null);
+  let svcDirty = $state(false); // réglages service modifiés mais pas encore sauvés
+  let svcReload = $state(false); // un champ nécessitant un reload (URL/team/UA) a changé
   let newWorkspaceName = $state("");
 
   type Tab = "general" | "services" | "appearance" | "privacy" | "advanced";
@@ -57,13 +62,18 @@
     autostart: false,
     startMinimized: false,
     theme: "system",
-    accentColor: "#4f46e5",
+    accentColor: "#ffc131",
     closeToSystemTray: true,
     privateNotifications: false,
     showDisabledServices: true,
     showServiceName: true,
     showMessageBadgeWhenMuted: true,
     userAgentPref: "",
+    sidebarWidth: 240,
+    iconSize: 24,
+    grayscaleServices: false,
+    grayscaleDim: 50,
+    sidebarServicesLocation: "top",
   });
 
   // Add service: full catalog loaded once, filtered live.
@@ -105,7 +115,14 @@
     });
     try {
       appSettings = await getAppSettings();
+      // Snap iconSize sur un niveau valide (anciennes valeurs improvisées).
+      const snapped = snapIconSize(appSettings.iconSize);
+      if (snapped !== appSettings.iconSize) {
+        appSettings.iconSize = snapped;
+        setAppSettings({ iconSize: snapped }).catch(() => {});
+      }
       applyTheme();
+      applyLayout();
     } catch {
       /* defaults */
     }
@@ -125,6 +142,23 @@
       (appSettings.theme === "system" && (darkMq?.matches ?? true));
     document.body.classList.toggle("light", !dark);
     document.body.style.setProperty("--accent", appSettings.accentColor);
+    document.body.style.setProperty("--accent-fg", accentFg(appSettings.accentColor));
+  }
+
+  // Customisation sidebar : largeur, taille des icônes, gris + dim, position.
+  function applyLayout() {
+    const b = document.body;
+    b.style.setProperty("--sidebar-w", `${appSettings.sidebarWidth}px`);
+    b.style.setProperty("--icon-size", `${appSettings.iconSize}px`);
+    b.classList.toggle("grayscale", !!appSettings.grayscaleServices);
+    // dim 0..100 -> opacité des icônes en gris (100 = très estompé)
+    const op = Math.max(0.2, 1 - (appSettings.grayscaleDim ?? 50) / 130);
+    b.style.setProperty("--gray-op", String(op));
+    b.dataset.svcloc = appSettings.sidebarServicesLocation ?? "top";
+  }
+
+  function markIconFailed(id: string) {
+    failedIcons = new Set(failedIcons).add(id);
   }
 
   async function loadAfterAuth() {
@@ -158,17 +192,18 @@
   }
 
   function openServiceSettings(s: Service) {
-    settingsSvc = s;
+    settingsSvc = { ...s }; // copie éditable ; appliquée au serveur au Save
+    svcDirty = false;
+    svcReload = false;
     view = "svcSettings";
     hideServices();
   }
 
-  async function saveSetting(key: keyof Service, value: boolean) {
+  async function persistService(reload = false) {
     if (!settingsSvc) return;
-    (settingsSvc as Record<string, unknown>)[key] = value;
-    const idx = services.findIndex((s) => s.id === settingsSvc!.id);
-    if (idx >= 0) (services[idx] as Record<string, unknown>)[key] = value;
     const s = settingsSvc;
+    const idx = services.findIndex((x) => x.id === s.id);
+    if (idx >= 0) services[idx] = { ...s };
     try {
       await updateService(s.id, {
         name: s.name,
@@ -176,11 +211,59 @@
         isNotificationEnabled: s.isNotificationEnabled,
         isMuted: s.isMuted,
         isBadgeEnabled: s.isBadgeEnabled,
+        isMediaBadgeEnabled: s.isMediaBadgeEnabled,
+        isIndirectMessageBadgeEnabled: s.isIndirectMessageBadgeEnabled,
+        isHibernationEnabled: s.isHibernationEnabled,
+        isWakeUpEnabled: s.isWakeUpEnabled,
+        trapLinkClicks: s.trapLinkClicks,
+        useFavicon: s.useFavicon,
+        isDarkModeEnabled: s.isDarkModeEnabled,
+        isProgressbarEnabled: s.isProgressbarEnabled,
+        onlyShowFavoritesInUnreadCount: s.onlyShowFavoritesInUnreadCount,
+        darkReaderBrightness: s.darkReaderBrightness,
+        darkReaderContrast: s.darkReaderContrast,
+        darkReaderSepia: s.darkReaderSepia,
+        isProxyFeatureEnabled: s.isProxyFeatureEnabled,
+        proxyHost: s.proxyHost ?? "",
+        proxyPort: s.proxyPort ?? "",
+        proxyUser: s.proxyUser ?? "",
+        proxyPassword: s.proxyPassword ?? "",
+        customUrl: s.customUrl ?? "",
+        team: s.team ?? "",
+        userAgentPref: s.userAgentPref ?? "",
       });
       await setServiceFlags(s);
+      if (reload) await closeService(s.id); // recreated on next open with new params
     } catch (err) {
       error = String(err);
     }
+  }
+
+  // Les handlers ne modifient QUE l'état local ; le Save persiste tout d'un coup.
+  function saveSetting(key: keyof Service, value: boolean) {
+    if (!settingsSvc) return;
+    (settingsSvc as Record<string, unknown>)[key] = value;
+    svcDirty = true;
+  }
+
+  function saveText(key: keyof Service, value: string, reload = false) {
+    if (!settingsSvc) return;
+    (settingsSvc as Record<string, unknown>)[key] = value;
+    svcDirty = true;
+    if (reload) svcReload = true;
+  }
+
+  function saveNum(key: keyof Service, value: string) {
+    if (!settingsSvc) return;
+    const n = Number.parseInt(value, 10);
+    (settingsSvc as Record<string, unknown>)[key] = Number.isNaN(n) ? undefined : n;
+    svcDirty = true;
+  }
+
+  async function saveServiceSettings() {
+    await persistService(svcReload);
+    svcDirty = false;
+    svcReload = false;
   }
 
   async function handleDelete(s: Service) {
@@ -273,16 +356,7 @@
     }
   }
 
-  const filteredRecipes = $derived.by(() => {
-    const q = recipeQuery.trim().toLowerCase();
-    const list = q
-      ? allRecipes.filter(
-          (r) =>
-            r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q),
-        )
-      : allRecipes;
-    return [...list].sort((a, b) => a.name.localeCompare(b.name));
-  });
+  const filteredRecipes = $derived(filterRecipes(allRecipes, recipeQuery));
 
   async function pickRecipe(r: RecipePreview) {
     try {
@@ -309,11 +383,14 @@
   async function saveAppSetting(key: keyof AppSettings, value: unknown) {
     (appSettings as Record<string, unknown>)[key] = value;
     if (key === "theme" || key === "accentColor") applyTheme();
+    applyLayout();
+    if (key === "sidebarWidth") setSidebarWidth(value as number).catch(() => {});
     try {
       appSettings = await setAppSettings({
         [key]: value,
       } as Partial<AppSettings>);
       applyTheme();
+      applyLayout();
     } catch (err) {
       error = String(err);
     }
@@ -379,10 +456,7 @@
     <aside class="sidebar">
       <div class="account">
         <strong>{me.firstname || me.email}</strong>
-        <span class="acts">
-          <button class="link" onclick={() => inspectService()} title="Inspect (devtools)">🐞</button>
-          <button class="link" onclick={handleLogout}>sign out</button>
-        </span>
+        <button class="link" onclick={handleLogout}>sign out</button>
       </div>
 
       <button class="add" onclick={openAdd}>＋ Add a service</button>
@@ -401,11 +475,13 @@
         <button class="pill mng" onclick={openWorkspaces} title="Manage workspaces">⚙</button>
       </div>
 
-      <div class="svclist">
-        {#each visibleServices as s (s.id)}{@render row(s)}{/each}
+      <div class="svcarea">
+        <div class="svclist">
+          {#each visibleServices as s (s.id)}{@render row(s)}{/each}
+        </div>
       </div>
 
-      <button class="appcog" onclick={openAppSettings}>⚙ Settings</button>
+      <button class="appcog" onclick={openAppSettings}><span class="ic">⚙</span> Settings</button>
       <div class="count">{services.length} services · {workspaces.length} workspaces</div>
     </aside>
 
@@ -423,14 +499,80 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Settings — {settingsSvc.name}</h2>
-            <button class="link" onclick={backToService}>✕ close</button>
+            <span class="head-actions">
+              <button class="primary sm" disabled={!svcDirty} onclick={saveServiceSettings}>
+                {svcDirty ? "Save changes" : "Saved"}
+              </button>
+              <button class="link" onclick={backToService}>✕ close</button>
+            </span>
           </div>
           <code class="recipe">recipe: {settingsSvc.recipeId}</code>
 
-          {@render toggle("Enabled", "isEnabled", settingsSvc.isEnabled !== false)}
-          {@render toggle("Notifications", "isNotificationEnabled", settingsSvc.isNotificationEnabled !== false)}
-          {@render toggle("Muted", "isMuted", settingsSvc.isMuted === true)}
-          {@render toggle("Unread badge", "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
+          <div class="set-title">General</div>
+          <label class="block">
+            Name
+            <input value={settingsSvc.name} onchange={(e) => saveText("name", e.currentTarget.value)} />
+          </label>
+          <div class="setrow">
+            <label class="block">
+              Custom URL
+              <input value={settingsSvc.customUrl ?? ""} placeholder="https://… (for services that support it)" onchange={(e) => saveText("customUrl", e.currentTarget.value, true)} />
+            </label>
+            <p class="desc">Override the service URL (self-hosted instances, custom domains). Reloads the service.</p>
+          </div>
+          <div class="setrow">
+            <label class="block">
+              Team / workspace ID
+              <input value={settingsSvc.team ?? ""} placeholder="e.g. Slack team" onchange={(e) => saveText("team", e.currentTarget.value, true)} />
+            </label>
+            <p class="desc">For services whose URL includes a team ID (Slack, etc.). Reloads the service.</p>
+          </div>
+
+          {@render toggle("Enabled", "Load this service. Disabled services stay listed but aren't loaded.", "isEnabled", settingsSvc.isEnabled !== false)}
+          {@render toggle("Notifications", "Show system notifications for new messages in this service.", "isNotificationEnabled", settingsSvc.isNotificationEnabled !== false)}
+          {@render toggle("Muted", "Silence this service — no notifications at all.", "isMuted", settingsSvc.isMuted === true)}
+          {@render toggle("Unread badge", "Count this service's unread messages in the dock badge.", "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
+          {@render toggle("Indirect message badge", "Also count indirect (group / channel) messages in the badge.", "isIndirectMessageBadgeEnabled", settingsSvc.isIndirectMessageBadgeEnabled === true)}
+          {@render toggle("Media badge", "Count calls / media activity in the badge.", "isMediaBadgeEnabled", settingsSvc.isMediaBadgeEnabled === true)}
+          {@render toggle("Allow hibernation", "Let this service sleep when inactive to save memory.", "isHibernationEnabled", settingsSvc.isHibernationEnabled === true)}
+          {@render toggle("Open links externally", "Open clicked links in your default browser instead of inside the service.", "trapLinkClicks", settingsSvc.trapLinkClicks === true)}
+          {@render toggle("Allow wake up", "Wake this service from hibernation on new activity.", "isWakeUpEnabled", settingsSvc.isWakeUpEnabled === true)}
+          {@render toggle("Only favorites in unread count", "Count unread messages only from favorite chats in this service.", "onlyShowFavoritesInUnreadCount", settingsSvc.onlyShowFavoritesInUnreadCount === true)}
+
+          <div class="set-title">Appearance</div>
+          {@render toggle("Dark mode", "Apply the recipe's dark theme to this service (synced with Ferdium).", "isDarkModeEnabled", settingsSvc.isDarkModeEnabled === true)}
+          {#if settingsSvc.isDarkModeEnabled}
+            <div class="setrow">
+              <div class="num-row">
+                <label>Brightness<input class="num" type="number" value={settingsSvc.darkReaderBrightness ?? 100} onchange={(e) => saveNum("darkReaderBrightness", e.currentTarget.value)} /></label>
+                <label>Contrast<input class="num" type="number" value={settingsSvc.darkReaderContrast ?? 90} onchange={(e) => saveNum("darkReaderContrast", e.currentTarget.value)} /></label>
+                <label>Sepia<input class="num" type="number" value={settingsSvc.darkReaderSepia ?? 10} onchange={(e) => saveNum("darkReaderSepia", e.currentTarget.value)} /></label>
+              </div>
+              <p class="desc">Dark Reader fine-tuning (applies to this service's dark mode).</p>
+            </div>
+          {/if}
+          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon.", "useFavicon", settingsSvc.useFavicon === true)}
+          {@render toggle("Progress bar", "Show a loading progress bar for this service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
+          <div class="setrow">
+            <label class="block">
+              Custom user agent
+              <input value={settingsSvc.userAgentPref ?? ""} placeholder="empty = app default" onchange={(e) => saveText("userAgentPref", e.currentTarget.value, true)} />
+            </label>
+            <p class="desc">Per-service browser identity, overrides the global one. Reloads the service.</p>
+          </div>
+
+          <div class="set-title">Proxy</div>
+          {@render toggle("Use a proxy", "Route this service through an HTTP/HTTPS proxy (synced with Ferdium).", "isProxyFeatureEnabled", settingsSvc.isProxyFeatureEnabled === true)}
+          {#if settingsSvc.isProxyFeatureEnabled}
+            <div class="setrow">
+              <div class="proxy-grid">
+                <input placeholder="Host" value={settingsSvc.proxyHost ?? ""} onchange={(e) => saveText("proxyHost", e.currentTarget.value)} />
+                <input placeholder="Port" value={String(settingsSvc.proxyPort ?? "")} onchange={(e) => saveText("proxyPort", e.currentTarget.value)} />
+                <input placeholder="Username (optional)" value={settingsSvc.proxyUser ?? ""} onchange={(e) => saveText("proxyUser", e.currentTarget.value)} />
+                <input placeholder="Password (optional)" type="password" value={settingsSvc.proxyPassword ?? ""} onchange={(e) => saveText("proxyPassword", e.currentTarget.value)} />
+              </div>
+            </div>
+          {/if}
 
           {#if error}<p class="error">{error}</p>{/if}
           <button class="danger" onclick={() => settingsSvc && handleDelete(settingsSvc)}>
@@ -530,52 +672,126 @@
           </div>
 
           {#if settingsTab === "general"}
-            {@render appToggle("Launch at login", "autostart", appSettings.autostart)}
-            {@render appToggle("Start in background (hidden window)", "startMinimized", appSettings.startMinimized)}
-            {@render appToggle("Close button hides to tray (instead of quitting)", "closeToSystemTray", appSettings.closeToSystemTray)}
+            {@render appToggle("Launch at login", "Start Tauridium automatically when you sign in to your Mac.", "autostart", appSettings.autostart)}
+            {@render appToggle("Start in background", "Launch with the window hidden — Tauridium stays in the tray/menu bar.", "startMinimized", appSettings.startMinimized)}
+            {@render appToggle("Close button hides to tray", "The window's close button hides Tauridium to the tray instead of quitting it.", "closeToSystemTray", appSettings.closeToSystemTray)}
           {:else if settingsTab === "services"}
-            {@render appToggle("Show disabled services", "showDisabledServices", appSettings.showDisabledServices)}
-            {@render appToggle("Show service names", "showServiceName", appSettings.showServiceName)}
-            {@render appToggle("Unread badge on muted services", "showMessageBadgeWhenMuted", appSettings.showMessageBadgeWhenMuted)}
+            {@render appToggle("Show disabled services", "Keep disabled services visible (dimmed) in the sidebar instead of hiding them.", "showDisabledServices", appSettings.showDisabledServices)}
+            {@render appToggle("Show service names", "Show the name next to each service icon in the sidebar.", "showServiceName", appSettings.showServiceName)}
+            {@render appToggle("Unread badge on muted services", "Still show the unread count on services that are muted.", "showMessageBadgeWhenMuted", appSettings.showMessageBadgeWhenMuted)}
           {:else if settingsTab === "appearance"}
-            <label class="row-toggle">
-              <span>Theme</span>
-              <select
-                class="select"
-                value={appSettings.theme}
-                onchange={(e) => saveAppSetting("theme", e.currentTarget.value)}
-              >
-                <option value="system">System</option>
-                <option value="dark">Dark</option>
-                <option value="light">Light</option>
-              </select>
-            </label>
-            <label class="row-toggle">
-              <span>Accent color</span>
-              <span class="swatches">
-                {#each ["#4f46e5", "#2563eb", "#0891b2", "#16a34a", "#d97706", "#dc2626", "#db2777", "#7c3aed"] as c (c)}
-                  <button
-                    class="swatch"
-                    class:on={appSettings.accentColor === c}
-                    style="background:{c}"
-                    aria-label={c}
-                    onclick={() => saveAppSetting("accentColor", c)}
-                  ></button>
-                {/each}
-              </span>
-            </label>
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Theme</span>
+                <select
+                  class="select"
+                  bind:value={appSettings.theme}
+                  onchange={() => saveAppSetting("theme", appSettings.theme)}
+                >
+                  <option value="system">System</option>
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                </select>
+              </label>
+              <p class="desc">System follows your macOS appearance; Dark or Light force one.</p>
+            </div>
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Accent color</span>
+                <span class="swatches">
+                  {#each ["#ffc131", "#4f46e5", "#2563eb", "#0891b2", "#16a34a", "#d97706", "#dc2626", "#db2777", "#7c3aed"] as c (c)}
+                    <button
+                      class="swatch"
+                      class:on={appSettings.accentColor === c}
+                      style="background:{c}"
+                      aria-label={c}
+                      onclick={() => saveAppSetting("accentColor", c)}
+                    ></button>
+                  {/each}
+                </span>
+              </label>
+              <p class="desc">Highlight color for the active service, buttons and selected workspace.</p>
+            </div>
+
+            <div class="set-title">Sidebar</div>
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Sidebar width</span>
+                <select
+                  class="select"
+                  bind:value={appSettings.sidebarWidth}
+                  onchange={() => saveAppSetting("sidebarWidth", appSettings.sidebarWidth)}
+                >
+                  <option value={200}>Compact</option>
+                  <option value={240}>Normal</option>
+                  <option value={300}>Wide</option>
+                </select>
+              </label>
+              <p class="desc">Width of the services sidebar.</p>
+            </div>
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Icon size</span>
+                <select
+                  class="select"
+                  bind:value={appSettings.iconSize}
+                  onchange={() => saveAppSetting("iconSize", appSettings.iconSize)}
+                >
+                  <option value={18}>Very small</option>
+                  <option value={21}>Small</option>
+                  <option value={24}>Normal</option>
+                  <option value={28}>Large</option>
+                  <option value={34}>Very large</option>
+                </select>
+              </label>
+              <p class="desc">Size of the service icons in the sidebar.</p>
+            </div>
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Services location</span>
+                <select
+                  class="select"
+                  bind:value={appSettings.sidebarServicesLocation}
+                  onchange={() => saveAppSetting("sidebarServicesLocation", appSettings.sidebarServicesLocation)}
+                >
+                  <option value="top">Top</option>
+                  <option value="center">Center</option>
+                  <option value="bottom">Bottom</option>
+                </select>
+              </label>
+              <p class="desc">Vertical position of the service list in the sidebar.</p>
+            </div>
+            {@render appToggle("Grayscale service icons", "Show icons in grayscale; full color on hover and when active.", "grayscaleServices", appSettings.grayscaleServices)}
+            {#if appSettings.grayscaleServices}
+              <div class="setrow">
+                <label class="row-toggle">
+                  <span>Grayscale dim level</span>
+                  <input
+                    class="range"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={appSettings.grayscaleDim}
+                    onchange={(e) => saveAppSetting("grayscaleDim", Number(e.currentTarget.value))}
+                  />
+                </label>
+                <p class="desc">How much inactive grayscale icons are dimmed.</p>
+              </div>
+            {/if}
           {:else if settingsTab === "privacy"}
-            {@render appToggle("Private notifications (hide message content)", "privateNotifications", appSettings.privateNotifications)}
+            {@render appToggle("Private notifications", "Hide the sender and message content in system notifications (shows just 'New message').", "privateNotifications", appSettings.privateNotifications)}
           {:else if settingsTab === "advanced"}
-            <label class="block">
-              Custom user agent (empty = default)
-              <input
-                value={appSettings.userAgentPref}
-                placeholder="Mozilla/5.0 …"
-                onchange={(e) => saveAppSetting("userAgentPref", e.currentTarget.value)}
-              />
-            </label>
-            <p class="sub">Applies to newly opened services (restart to apply everywhere).</p>
+            <div class="setrow">
+              <label class="block">
+                Custom user agent
+                <input
+                  value={appSettings.userAgentPref}
+                  placeholder="empty = default (modern Safari)"
+                  onchange={(e) => saveAppSetting("userAgentPref", e.currentTarget.value)}
+                />
+              </label>
+              <p class="desc">Override the browser identity sent to services. Applies to newly opened services (restart to apply everywhere).</p>
+            </div>
             <div class="set-title">Server</div>
             <code class="recipe">{server}</code>
             <p class="sub">Signed in as {me.email}. Sign out to change server.</p>
@@ -596,10 +812,10 @@
       class:disabled={!s.isEnabled}
       onclick={() => selectService(s)}
     >
-      {#if s.iconUrl}
-        <img src={s.iconUrl} alt="" />
-      {:else}
+      {#if failedIcons.has(s.id)}
         <span class="dot">{s.name.slice(0, 1)}</span>
+      {:else}
+        <img class="svc-icon" src={iconSrc(s)} alt="" onerror={() => markIconFailed(s.id)} />
       {/if}
       {#if appSettings.showServiceName}
         <span class="srow-name">{s.name}</span>
@@ -614,26 +830,32 @@
   </div>
 {/snippet}
 
-{#snippet toggle(label: string, key: keyof Service, checked: boolean)}
-  <label class="row-toggle">
-    <input
-      type="checkbox"
-      {checked}
-      onchange={(e) => saveSetting(key, e.currentTarget.checked)}
-    />
-    <span>{label}</span>
-  </label>
+{#snippet toggle(label: string, desc: string, key: keyof Service, checked: boolean)}
+  <div class="setrow">
+    <label class="row-toggle">
+      <input
+        type="checkbox"
+        {checked}
+        onchange={(e) => saveSetting(key, e.currentTarget.checked)}
+      />
+      <span>{label}</span>
+    </label>
+    <p class="desc">{desc}</p>
+  </div>
 {/snippet}
 
-{#snippet appToggle(label: string, key: keyof AppSettings, checked: boolean)}
-  <label class="row-toggle">
-    <input
-      type="checkbox"
-      {checked}
-      onchange={(e) => saveAppSetting(key, e.currentTarget.checked)}
-    />
-    <span>{label}</span>
-  </label>
+{#snippet appToggle(label: string, desc: string, key: keyof AppSettings, checked: boolean)}
+  <div class="setrow">
+    <label class="row-toggle">
+      <input
+        type="checkbox"
+        {checked}
+        onchange={(e) => saveAppSetting(key, e.currentTarget.checked)}
+      />
+      <span>{label}</span>
+    </label>
+    <p class="desc">{desc}</p>
+  </div>
 {/snippet}
 
 <style>
@@ -641,7 +863,7 @@
     --bg: #1f2230; --sidebar: #1b1d28; --card: #282b3a; --panel: #232633;
     --input: #1f2230; --border: #2f3445; --border2: #3a3f55;
     --text: #e8e8ef; --text2: #d6d9e6; --muted: #9aa0b5; --muted2: #6b7193;
-    --hover: #262a3a; --accent: #4f46e5; --accent-soft: #b9b2ff; --link: #7a82a8;
+    --hover: #262a3a; --accent: #ffc131; --accent-fg: #1f2230; --accent-soft: #b9b2ff; --link: #7a82a8;
   }
   :global(body.light) {
     --bg: #f3f4f8; --sidebar: #e9ebf1; --card: #ffffff; --panel: #ffffff;
@@ -670,17 +892,20 @@
   }
   .primary {
     padding: 10px 14px; border: none; border-radius: 8px; background: var(--accent);
-    color: #fff; font-weight: 700; cursor: pointer;
+    color: var(--accent-fg); font-weight: 700; cursor: pointer;
   }
   .primary:disabled { opacity: 0.6; cursor: default; }
   .gear { align-self: flex-start; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
   .error { color: #ff8a8a; font-size: 13px; margin: 4px 0; }
 
-  .shell { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
+  .shell { display: grid; grid-template-columns: var(--sidebar-w, 240px) 1fr; height: 100vh; }
   .sidebar {
-    background: var(--sidebar); padding: 12px; overflow-y: auto;
+    background: var(--sidebar); padding: 12px; overflow: hidden;
     display: flex; flex-direction: column; gap: 12px;
   }
+  .svcarea { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+  :global(body[data-svcloc="center"]) .svcarea { justify-content: center; }
+  :global(body[data-svcloc="bottom"]) .svcarea { justify-content: flex-end; }
   .account { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
   .acts { display: inline-flex; gap: 8px; align-items: center; }
   .link { background: none; border: none; color: var(--link); cursor: pointer; font-size: 12px; text-decoration: underline; }
@@ -694,8 +919,8 @@
     background: var(--hover); border: none; color: var(--muted);
     border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px;
   }
-  .pill.on { background: var(--accent); color: #fff; }
-  .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); }
+  .pill.on { background: var(--accent); color: var(--accent-fg); }
+  .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 9px; }
   .svclist { display: flex; flex-direction: column; gap: 2px; }
 
   .srow-wrap { display: flex; align-items: center; }
@@ -705,10 +930,13 @@
     color: var(--text2); cursor: pointer; text-align: left; font-size: 14px;
   }
   .srow:hover { background: var(--hover); }
-  .srow.active { background: var(--accent); color: #fff; }
+  .srow.active { background: var(--accent); color: var(--accent-fg); }
   .srow.disabled { opacity: 0.45; }
-  .srow img, .srow .dot { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex: none; }
+  .svc-icon, .srow .dot { width: var(--icon-size, 22px); height: var(--icon-size, 22px); border-radius: 5px; object-fit: cover; flex: none; }
   .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
+  :global(body.grayscale) .svc-icon { filter: grayscale(1); opacity: var(--gray-op, 0.6); transition: filter 0.15s, opacity 0.15s; }
+  :global(body.grayscale) .srow:hover .svc-icon,
+  :global(body.grayscale) .srow.active .svc-icon { filter: none; opacity: 1; }
   .srow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ubadge {
     margin-left: auto; background: #e23b3b; color: #fff; font-size: 11px; font-weight: 700;
@@ -716,13 +944,15 @@
     display: inline-flex; align-items: center; justify-content: center;
   }
   .ubadge.muted { background: var(--muted2); }
-  .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 13px; opacity: 0; padding: 4px; }
+  .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 21px; line-height: 1; opacity: 0; padding: 2px 4px; }
   .srow-wrap:hover .cog { opacity: 1; }
   .cog:hover { color: var(--accent-soft); }
   .appcog {
-    margin-top: auto; background: var(--hover); border: 1px solid var(--border);
-    color: var(--text2); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px;
+    background: var(--hover); border: 1px solid var(--border);
+    color: var(--text2); border-radius: 8px; padding: 9px; cursor: pointer; font-size: 13px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   }
+  .appcog .ic { font-size: 19px; line-height: 1; }
   .appcog:hover { filter: brightness(1.1); }
   .count { font-size: 11px; color: var(--muted2); }
 
@@ -733,7 +963,9 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px;
     display: flex; flex-direction: column; gap: 14px;
   }
-  .panel-head { display: flex; justify-content: space-between; align-items: center; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .head-actions { display: inline-flex; align-items: center; gap: 12px; }
+  .primary.sm { padding: 6px 12px; font-size: 13px; }
   .panel-head h2 { margin: 0; font-size: 18px; }
   .recipe { color: var(--accent-soft); font-size: 12px; }
   .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
@@ -742,10 +974,13 @@
   .set-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted2); }
   .row-toggle { flex-direction: row; align-items: center; gap: 10px; color: var(--text2); font-size: 14px; cursor: pointer; }
   .row-toggle input { width: auto; }
+  .setrow { display: flex; flex-direction: column; gap: 3px; }
+  .desc { margin: 0 0 0 26px; color: var(--muted); font-size: 12px; line-height: 1.35; }
   .select {
     margin-left: auto; padding: 6px 9px; border-radius: 8px;
     border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px;
   }
+  .range { margin-left: auto; width: 130px; accent-color: var(--accent); }
   .swatches { margin-left: auto; display: inline-flex; gap: 7px; }
   .swatch {
     width: 22px; height: 22px; border-radius: 999px; border: none; padding: 0; cursor: pointer;
@@ -761,6 +996,10 @@
   .wsname { flex: 1; }
   .wsservices { display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow-y: auto; }
   .block { gap: 6px; }
+  .num-row { display: flex; gap: 12px; }
+  .num-row label { flex: 1; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .num { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px; }
+  .proxy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .danger { margin-top: 6px; background: #3a2330; border: 1px solid #6e2b3e; color: #ff9aa8; border-radius: 8px; padding: 9px; cursor: pointer; }
   .danger:hover { filter: brightness(1.15); }
   .results { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }

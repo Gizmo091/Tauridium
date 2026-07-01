@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewBuilder;
 use tauri::{
@@ -25,7 +25,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 // User-agent pour les appels API serveur Ferdium / récupération des recipes.
-const API_UA: &str = concat!("pakeFerdium/", env!("CARGO_PKG_VERSION"));
+const API_UA: &str = concat!("Tauridium/", env!("CARGO_PKG_VERSION"));
 // Largeur (logique) de la sidebar — doit coïncider avec le CSS du shell.
 const SIDEBAR_W: f64 = 240.0;
 // UA Safari moderne AVEC le token `Version/` : WhatsApp exige Safari >= 15, or la webview
@@ -42,7 +42,8 @@ struct AppState {
     active: Mutex<Option<String>>,   // serviceId actuellement affiché
     unread: Mutex<HashMap<String, i64>>, // non-lus par service (pour le badge dock)
     flags: Mutex<HashMap<String, ServiceFlags>>, // réglages par service (notif/mute/badge)
-    settings: Mutex<Value>,              // cache des réglages app (lu par le poller, etc.)
+    settings: Mutex<Value>,          // cache des réglages app (lu par le poller, etc.)
+    sidebar_w: Mutex<f64>,           // largeur de la sidebar (init en setup, def. 240)
 }
 
 #[derive(Clone, Copy)]
@@ -242,7 +243,10 @@ async fn recipe_config(app_data: &Path, recipe_id: &str) -> Result<Value, String
         .await
         .map_err(|e| format!("Téléchargement du recipe {recipe_id} échoué : {e}"))?;
     if !res.status().is_success() {
-        return Err(format!("Recipe {recipe_id} introuvable (HTTP {})", res.status()));
+        return Err(format!(
+            "Recipe {recipe_id} introuvable (HTTP {})",
+            res.status()
+        ));
     }
     let text = res
         .text()
@@ -261,9 +265,16 @@ fn ensure_scheme(u: &str) -> String {
 }
 
 // Réplique le getter `url` du modèle Service de ferdium-app.
-fn resolve_url(cfg: &Value, custom_url: Option<&str>, team: Option<&str>) -> Result<String, String> {
+fn resolve_url(
+    cfg: &Value,
+    custom_url: Option<&str>,
+    team: Option<&str>,
+) -> Result<String, String> {
     let config = cfg.get("config").ok_or("Recipe sans bloc config")?;
-    let service_url = config.get("serviceURL").and_then(Value::as_str).unwrap_or("");
+    let service_url = config
+        .get("serviceURL")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let has_custom = config
         .get("hasCustomUrl")
         .and_then(Value::as_bool)
@@ -365,14 +376,15 @@ fn uuid_to_bytes(s: &str) -> Option<[u8; 16]> {
 // Rectangle (logique) de la zone service = tout à droite de la sidebar.
 fn service_rect(
     win: &tauri::window::Window<Wry>,
+    sidebar_w: f64,
 ) -> Result<(LogicalPosition<f64>, LogicalSize<f64>), String> {
     let phys = win.inner_size().map_err(|e| e.to_string())?;
     let scale = win.scale_factor().map_err(|e| e.to_string())?;
     let w = phys.width as f64 / scale;
     let h = phys.height as f64 / scale;
     Ok((
-        LogicalPosition::new(SIDEBAR_W, 0.0),
-        LogicalSize::new((w - SIDEBAR_W).max(0.0), h),
+        LogicalPosition::new(sidebar_w, 0.0),
+        LogicalSize::new((w - sidebar_w).max(0.0), h),
     ))
 }
 
@@ -467,6 +479,7 @@ async fn show_service(
     recipe_id: String,
     custom_url: Option<String>,
     team: Option<String>,
+    user_agent_pref: Option<String>,
 ) -> Result<(), String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let cfg = recipe_config(&app_data, &recipe_id).await?;
@@ -477,7 +490,8 @@ async fn show_service(
         .get_window("main")
         .ok_or("Fenêtre principale introuvable")?;
     let label = format!("svc-{service_id}");
-    let (pos, size) = service_rect(&win)?;
+    let sw = *state.sidebar_w.lock().unwrap();
+    let (pos, size) = service_rect(&win, sw)?;
 
     let exists = state.created.lock().unwrap().contains(&service_id);
     if exists {
@@ -491,20 +505,28 @@ async fn show_service(
         let runtime = recipe_webview_js(&app_data, &recipe_id)
             .await
             .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
-        // UA : override utilisateur (userAgentPref) sinon SERVICE_UA (Safari moderne :
-        // satisfait WhatsApp >= 15 sans casser Synology).
+        // UA : override par service, sinon override global, sinon SERVICE_UA (Safari
+        // moderne : satisfait WhatsApp >= 15 sans casser Synology).
         let ua = {
-            let s = state.settings.lock().unwrap();
-            let pref = s
-                .get("userAgentPref")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if pref.is_empty() {
-                SERVICE_UA.to_string()
+            let per_service = user_agent_pref
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(p) = per_service {
+                p.to_string()
             } else {
-                pref
+                let s = state.settings.lock().unwrap();
+                let global = s
+                    .get("userAgentPref")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if global.is_empty() {
+                    SERVICE_UA.to_string()
+                } else {
+                    global
+                }
             }
         };
         // Shim IPC injecté pour TOUS les services (comme Ferdium expose ipcRenderer à
@@ -537,24 +559,6 @@ async fn show_service(
     Ok(())
 }
 
-// Ouvre les devtools sur la webview du service actif (debug uniquement) — diagnostic.
-#[tauri::command]
-fn inspect_service(app: AppHandle, state: State<'_, AppState>) {
-    #[cfg(debug_assertions)]
-    {
-        let active = state.active.lock().unwrap().clone();
-        if let Some(sid) = active {
-            if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
-                wv.open_devtools();
-            }
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (app, state);
-    }
-}
-
 // Masque toutes les webviews de services (pour afficher un panneau plein écran du shell).
 #[tauri::command]
 fn hide_all_services(app: AppHandle, state: State<'_, AppState>) {
@@ -565,6 +569,26 @@ fn hide_all_services(app: AppHandle, state: State<'_, AppState>) {
         }
     }
     *state.active.lock().unwrap() = None;
+}
+
+// Ferme la webview d'UN service (pour la recréer avec de nouveaux paramètres).
+#[tauri::command]
+fn close_service(app: AppHandle, state: State<'_, AppState>, service_id: String) {
+    if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
+        let _ = wv.close();
+    }
+    state.created.lock().unwrap().remove(&service_id);
+    state.unread.lock().unwrap().remove(&service_id);
+    if state.active.lock().unwrap().as_deref() == Some(service_id.as_str()) {
+        *state.active.lock().unwrap() = None;
+    }
+}
+
+// Change la largeur de la sidebar et repositionne la webview du service actif.
+#[tauri::command]
+fn set_sidebar_width(app: AppHandle, state: State<'_, AppState>, width: f64) {
+    *state.sidebar_w.lock().unwrap() = width.clamp(160.0, 420.0);
+    reposition_active(&app);
 }
 
 #[tauri::command]
@@ -591,11 +615,14 @@ fn set_service_flags(
     muted: bool,
     badge: bool,
 ) {
-    state
-        .flags
-        .lock()
-        .unwrap()
-        .insert(service_id, ServiceFlags { notif, muted, badge });
+    state.flags.lock().unwrap().insert(
+        service_id,
+        ServiceFlags {
+            notif,
+            muted,
+            badge,
+        },
+    );
 }
 
 // Modifie un service (réglages) -> PUT /v1/service/:id. `patch` doit inclure `name`.
@@ -753,10 +780,14 @@ fn logout(app: AppHandle, state: State<'_, AppState>) {
 
 // Repositionne la webview active sur la zone service (appelé au resize).
 fn reposition_active(app: &AppHandle) {
-    let active = app.state::<AppState>().active.lock().unwrap().clone();
+    let st = app.state::<AppState>();
+    let active = st.active.lock().unwrap().clone();
     let Some(sid) = active else { return };
-    let Some(win) = app.get_window("main") else { return };
-    if let Ok((pos, size)) = service_rect(&win) {
+    let sw = *st.sidebar_w.lock().unwrap();
+    let Some(win) = app.get_window("main") else {
+        return;
+    };
+    if let Ok((pos, size)) = service_rect(&win, sw) {
         if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
             let _ = wv.set_position(pos);
             let _ = wv.set_size(size);
@@ -863,13 +894,18 @@ fn read_app_settings_value(app: &AppHandle) -> Value {
         "autostart": false,
         "startMinimized": false,
         "theme": "system",
-        "accentColor": "#4f46e5",
+        "accentColor": "#ffc131",
         "closeToSystemTray": true,
         "privateNotifications": false,
         "showDisabledServices": true,
         "showServiceName": true,
         "showMessageBadgeWhenMuted": true,
-        "userAgentPref": ""
+        "userAgentPref": "",
+        "sidebarWidth": 240,
+        "iconSize": 24,
+        "grayscaleServices": false,
+        "grayscaleDim": 50,
+        "sidebarServicesLocation": "top"
     });
     if let Some(p) = app_settings_path(app) {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -947,6 +983,121 @@ fn toggle_main(app: &AppHandle) {
     }
 }
 
+// Ouvre/ferme les devtools sur la webview du service actif (debug), puis repose le layout.
+fn toggle_devtools(app: &AppHandle) {
+    #[cfg(debug_assertions)]
+    {
+        let active = app.state::<AppState>().active.lock().unwrap().clone();
+        if let Some(sid) = active {
+            if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
+                if wv.is_devtools_open() {
+                    wv.close_devtools();
+                } else {
+                    wv.open_devtools();
+                }
+            }
+        }
+        reposition_active(app);
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = app;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn password_hash_is_base64_of_sha256() {
+        // sha256("password") encodé en base64 (cf. UserApi.ts de ferdium-app).
+        assert_eq!(
+            ferdium_password_hash("password"),
+            "XohImNooBHFR0OVvjcYpJ3NgPQ1qq73WKhHvch0VQtg="
+        );
+        // 32 octets -> 44 caractères base64, quel que soit l'input.
+        assert_eq!(ferdium_password_hash("").len(), 44);
+        assert_eq!(ferdium_password_hash("é&@ 123").len(), 44);
+    }
+
+    #[test]
+    fn normalize_server_trims_and_strips_trailing_slashes() {
+        assert_eq!(
+            normalize_server("  https://api.ferdium.org/  "),
+            "https://api.ferdium.org"
+        );
+        assert_eq!(normalize_server("https://x.y"), "https://x.y");
+        assert_eq!(normalize_server("https://x.y///"), "https://x.y");
+    }
+
+    #[test]
+    fn ensure_scheme_prepends_https_when_missing() {
+        assert_eq!(ensure_scheme("example.com"), "https://example.com");
+        assert_eq!(ensure_scheme("https://example.com"), "https://example.com");
+        assert_eq!(ensure_scheme("http://example.com"), "http://example.com");
+    }
+
+    #[test]
+    fn resolve_url_uses_plain_service_url() {
+        let cfg = json!({ "config": { "serviceURL": "https://web.whatsapp.com" } });
+        assert_eq!(
+            resolve_url(&cfg, None, None).unwrap(),
+            "https://web.whatsapp.com"
+        );
+    }
+
+    #[test]
+    fn resolve_url_honours_custom_url_only_when_allowed() {
+        let cfg = json!({ "config": { "serviceURL": "https://default", "hasCustomUrl": true } });
+        assert_eq!(
+            resolve_url(&cfg, Some("chat.example.fr"), None).unwrap(),
+            "https://chat.example.fr"
+        );
+        // URL custom vide -> retombe sur serviceURL.
+        assert_eq!(
+            resolve_url(&cfg, Some(""), None).unwrap(),
+            "https://default"
+        );
+        // Recipe sans hasCustomUrl -> l'URL custom est ignorée.
+        let cfg2 = json!({ "config": { "serviceURL": "https://default" } });
+        assert_eq!(
+            resolve_url(&cfg2, Some("chat.example.fr"), None).unwrap(),
+            "https://default"
+        );
+    }
+
+    #[test]
+    fn resolve_url_substitutes_team_id() {
+        let cfg =
+            json!({ "config": { "serviceURL": "https://{teamId}.slack.com", "hasTeamId": true } });
+        assert_eq!(
+            resolve_url(&cfg, None, Some("acme")).unwrap(),
+            "https://acme.slack.com"
+        );
+    }
+
+    #[test]
+    fn resolve_url_errors_without_service_url() {
+        assert!(resolve_url(&json!({ "config": {} }), None, None).is_err());
+        assert!(resolve_url(&json!({}), None, None).is_err());
+    }
+
+    #[test]
+    fn uuid_to_bytes_parses_valid_and_rejects_bad() {
+        let b = uuid_to_bytes("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        assert_eq!(b[0], 0x00);
+        assert_eq!(b[1], 0x11);
+        assert_eq!(b[15], 0xff);
+        // 32 hex sans tirets accepté aussi.
+        assert!(uuid_to_bytes("00112233445566778899aabbccddeeff").is_some());
+        // mauvaise longueur / hex invalide.
+        assert!(uuid_to_bytes("abc").is_none());
+        assert!(uuid_to_bytes("zz112233-4455-6677-8899-aabbccddeeff").is_none());
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -959,11 +1110,26 @@ fn main() {
             // Cache des réglages app en mémoire (lu par le poller, la fermeture, etc.).
             *app.state::<AppState>().settings.lock().unwrap() =
                 read_app_settings_value(&app.handle());
+            {
+                let st = app.state::<AppState>();
+                let w = st
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .get("sidebarWidth")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(SIDEBAR_W);
+                *st.sidebar_w.lock().unwrap() = w;
+            }
 
             let handle = app.handle().clone();
             if let Some(win) = app.get_window("main") {
                 win.on_window_event(move |event| match event {
                     WindowEvent::Resized(_) => reposition_active(&handle),
+                    // Au retour de focus (ex. après fermeture des devtools), on repose le
+                    // layout : la webview du service peut avoir été redimensionnée et
+                    // recouvert la sidebar.
+                    WindowEvent::Focused(true) => reposition_active(&handle),
                     WindowEvent::CloseRequested { api, .. } => {
                         // « close to tray » : on cache au lieu de quitter (sinon on quitte).
                         let close_to_tray = handle
@@ -1013,6 +1179,53 @@ fn main() {
             }
             tray.build(app)?;
 
+            // Menu natif macOS : App / Edit / View (Toggle Developer Tools).
+            {
+                let app_sub = Submenu::with_items(
+                    app,
+                    "Tauridium",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(app, None, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::hide(app, None)?,
+                        &PredefinedMenuItem::hide_others(app, None)?,
+                        &PredefinedMenuItem::show_all(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::quit(app, None)?,
+                    ],
+                )?;
+                let edit = Submenu::with_items(
+                    app,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, None)?,
+                        &PredefinedMenuItem::redo(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, None)?,
+                        &PredefinedMenuItem::copy(app, None)?,
+                        &PredefinedMenuItem::paste(app, None)?,
+                        &PredefinedMenuItem::select_all(app, None)?,
+                    ],
+                )?;
+                let devtools = MenuItem::with_id(
+                    app,
+                    "toggle-devtools",
+                    "Toggle Developer Tools",
+                    true,
+                    Some("CmdOrCtrl+Alt+I"),
+                )?;
+                let view = Submenu::with_items(app, "View", true, &[&devtools])?;
+                let menu = Menu::with_items(app, &[&app_sub, &edit, &view])?;
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| {
+                    if event.id.as_ref() == "toggle-devtools" {
+                        toggle_devtools(app);
+                    }
+                });
+            }
+
             // Demande l'autorisation de notifier au lancement.
             // NB : no-op sur macOS desktop (l'OS gère l'autorisation lui-même) ; réel
             // sur mobile / Windows / build .app signée.
@@ -1041,8 +1254,9 @@ fn main() {
             get_services,
             get_workspaces,
             show_service,
-            inspect_service,
             hide_all_services,
+            close_service,
+            set_sidebar_width,
             close_services,
             logout,
             set_service_flags,

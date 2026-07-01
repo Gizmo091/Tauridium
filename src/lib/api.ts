@@ -19,6 +19,26 @@ export interface Service {
   isMuted?: boolean;
   isNotificationEnabled?: boolean;
   isBadgeEnabled?: boolean;
+  isMediaBadgeEnabled?: boolean;
+  isIndirectMessageBadgeEnabled?: boolean;
+  isHibernationEnabled?: boolean;
+  isWakeUpEnabled?: boolean;
+  trapLinkClicks?: boolean;
+  useFavicon?: boolean;
+  isDarkModeEnabled?: boolean;
+  isProgressbarEnabled?: boolean;
+  onlyShowFavoritesInUnreadCount?: boolean;
+  darkReaderBrightness?: number;
+  darkReaderContrast?: number;
+  darkReaderSepia?: number;
+  isProxyFeatureEnabled?: boolean;
+  proxyHost?: string;
+  proxyPort?: string | number;
+  proxyUser?: string;
+  proxyPassword?: string;
+  customUrl?: string;
+  team?: string;
+  userAgentPref?: string;
   order?: number;
   workspaces?: string[];
   [k: string]: unknown;
@@ -74,7 +94,12 @@ export function showService(s: Service): Promise<void> {
     recipeId: s.recipeId,
     customUrl: (s.customUrl as string | undefined) ?? null,
     team: (s.team as string | undefined) ?? null,
+    userAgentPref: (s.userAgentPref as string | undefined) ?? null,
   });
+}
+
+export function closeService(serviceId: string): Promise<void> {
+  return invoke("close_service", { serviceId });
 }
 
 export function closeServices(): Promise<void> {
@@ -141,7 +166,16 @@ export interface AppSettings {
   showServiceName: boolean;
   showMessageBadgeWhenMuted: boolean;
   userAgentPref: string;
+  sidebarWidth: number;
+  iconSize: number;
+  grayscaleServices: boolean;
+  grayscaleDim: number;
+  sidebarServicesLocation: "top" | "center" | "bottom";
   [k: string]: unknown;
+}
+
+export function setSidebarWidth(width: number): Promise<void> {
+  return invoke("set_sidebar_width", { width });
 }
 
 export function getAppSettings(): Promise<AppSettings> {
@@ -154,7 +188,3 @@ export function setAppSettings(
   return invoke("set_app_settings", { patch });
 }
 
-// Ouvre les devtools sur la webview du service actif (debug).
-export function inspectService(): Promise<void> {
-  return invoke("inspect_service");
-}
