@@ -1,0 +1,111 @@
+name: Release
+
+# Déclenché par un tag de version (ex. v1.2.0). Enchaîne :
+#   1) tests unitaires  2) build multi-plateforme  3) publication de la release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # 1) Gate : les tests doivent passer avant de compiler quoi que ce soit.
+  test:
+    name: Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Frontend unit tests
+        run: npm test
+      - name: Install Linux WebView deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # 2) Build natif pour chaque plateforme/architecture. Chaque job pousse ses
+  #    bundles dans une release en brouillon (draft).
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS universel (Intel + Apple Silicon en un seul bundle).
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+            targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+          # Linux x86_64 (Intel/AMD).
+          - platform: ubuntu-22.04
+            args: ''
+            targets: ''
+          # Linux ARM64 (runner ARM hébergé par GitHub).
+          - platform: ubuntu-24.04-arm
+            args: ''
+            targets: ''
+          # Windows x86_64 (Intel/AMD).
+          - platform: windows-latest
+            args: ''
+            targets: ''
+          # Windows ARM64 (runner ARM hébergé par GitHub).
+          - platform: windows-11-arm
+            args: ''
+            targets: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install Linux WebView deps
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build the app & upload bundles to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Tauridium ${{ github.ref_name }}'
+          releaseBody: |
+            Automated build of Tauridium ${{ github.ref_name }}.
+            Download the asset matching your platform below.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  # 3) Tous les builds OK -> on publie la release (draft -> published).
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flip the draft release to published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false --latest
