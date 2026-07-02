@@ -1,7 +1,8 @@
 name: Release
 
 # Déclenché par un tag de version (ex. v1.2.0). Enchaîne :
-#   1) tests unitaires  2) build multi-plateforme  3) publication de la release.
+#   1) tests  2) création de la release draft  3) build multi-plateforme
+#   4) publication de la release.
 on:
   push:
     tags:
@@ -34,11 +35,37 @@ jobs:
       - name: Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-  # 2) Build natif pour chaque plateforme/architecture. Chaque job pousse ses
-  #    bundles dans une release en brouillon (draft).
+  # 2) Crée la release en brouillon UNE SEULE FOIS (évite que chaque job de la
+  #    matrice en crée une -> plus de releases dupliquées / assets éparpillés).
+  create-release:
+    name: Create draft release
+    needs: test
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create the draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = process.env.GITHUB_REF_NAME;
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Tauridium ${tag}`,
+              body: `Automated build of Tauridium ${tag}.\nDownload the asset matching your platform below.`,
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  # 3) Build natif pour chaque plateforme/architecture -> upload dans LA release.
   build:
     name: Build ${{ matrix.platform }}
-    needs: test
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +121,7 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - name: Build the app & upload bundles to the draft release
+      - name: Build the app & upload bundles to the release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,16 +136,10 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Tauridium ${{ github.ref_name }}'
-          releaseBody: |
-            Automated build of Tauridium ${{ github.ref_name }}.
-            Download the asset matching your platform below.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
-  # 3) Tous les builds OK -> on publie la release (draft -> published).
+  # 4) Tous les builds OK -> on publie la release (draft -> published).
   publish:
     name: Publish release
     needs: build
