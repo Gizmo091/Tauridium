@@ -85,11 +85,29 @@ git tag v0.1.0 && git push origin v0.1.0
 Continuous integration (`cargo fmt` · clippy · Rust tests · svelte-check ·
 vitest · frontend build) runs on every push and pull request.
 
+## Install
+
+Grab the asset for your platform from the
+[latest release](../../releases/latest).
+
+**macOS** builds are **unsigned** (no paid Apple Developer account), so Gatekeeper
+blocks them on first launch (*"Tauridium can't be opened…"*). Open the `.dmg`,
+drag Tauridium to Applications, then either:
+
+- **macOS ≤ 14**: right-click the app → **Open** → confirm; or
+- **macOS 15+**: try to open it, then **System Settings → Privacy & Security →
+  Open Anyway**; or
+- run once in Terminal: `xattr -cr /Applications/Tauridium.app`
+
+**Linux**: `.deb` / `.rpm` / `.AppImage` (x86_64 and ARM64).
+**Windows**: `.msi` or `-setup.exe` (x64 and ARM64).
+
 ## Status & caveats
 
 - Vibe-coded personal project — expect rough edges.
 - Primary target is **macOS**; other platforms build in CI but are less
   battle-tested.
-- macOS CI builds are unsigned (users may need to right-click → Open). Proper
-  Developer ID signing + notarization is a future step.
+- macOS builds are **unsigned** (see [Install](#install)) — proper Developer ID
+  signing + notarization needs a paid Apple Developer account, wired in CI and
+  ready to activate via secrets.
 - Not affiliated with Ferdium.
