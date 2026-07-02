@@ -70,6 +70,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Le nom des bundles vient de la version de l'app (tauri.conf.json / Cargo.toml),
+      # pas du tag. On la cale sur le tag pour que les artefacts soient bien nommés.
+      - name: Sync app version to the tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          echo "App version -> $VERSION"
+          node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          node -e "const fs=require('fs');const p='src-tauri/Cargo.toml';let t=fs.readFileSync(p,'utf8');t=t.replace(/^version = \".*\"/m,'version = \"'+process.env.VERSION+'\"');fs.writeFileSync(p,t);"
       - name: Install Linux WebView deps
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
