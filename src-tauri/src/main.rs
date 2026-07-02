@@ -69,9 +69,15 @@ fn host_matches(host: &str, domain: &str) -> bool {
 
 // Hôtes Google sensibles (login/Gmail/Chat) -> UA chromeless.
 fn is_google_auth_host(host: &str) -> bool {
-    ["gmail.com", "googlemail.com", "mail.google.com", "chat.google.com", "accounts.google.com"]
-        .iter()
-        .any(|d| host_matches(host, d))
+    [
+        "gmail.com",
+        "googlemail.com",
+        "mail.google.com",
+        "chat.google.com",
+        "accounts.google.com",
+    ]
+    .iter()
+    .any(|d| host_matches(host, d))
 }
 
 // Services Google génériques -> injection du script de compat.
