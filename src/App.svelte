@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { accentFg, iconSrc, filterRecipes, snapIconSize } from "./lib/ui";
+  import { appVersion, checkForUpdate, installUpdate, type Update } from "./lib/updater";
   import {
     login,
     restoreSession,
@@ -55,8 +56,15 @@
   let svcReload = $state(false); // un champ nécessitant un reload (URL/team/UA) a changé
   let newWorkspaceName = $state("");
 
-  type Tab = "general" | "services" | "appearance" | "privacy" | "advanced";
+  type Tab = "general" | "services" | "appearance" | "privacy" | "advanced" | "updates";
   let settingsTab = $state<Tab>("general");
+
+  // Mises à jour (auto-updater).
+  let appVer = $state("");
+  let updateInfo = $state<Update | null>(null);
+  let updChecking = $state(false);
+  let updInstalling = $state(false);
+  let updStatus = $state("");
 
   let appSettings = $state<AppSettings>({
     autostart: false,
@@ -139,6 +147,10 @@
     } finally {
       booting = false;
     }
+    appVersion()
+      .then((v) => (appVer = v))
+      .catch(() => {});
+    checkUpdates(true); // vérif silencieuse au démarrage
   });
 
   function applyTheme() {
@@ -421,6 +433,31 @@
     hideServices();
   }
 
+  async function checkUpdates(silent = false) {
+    updChecking = true;
+    if (!silent) updStatus = "";
+    try {
+      updateInfo = await checkForUpdate();
+      if (!silent && !updateInfo) updStatus = "You're on the latest version.";
+    } catch (e) {
+      if (!silent) updStatus = `Update check failed: ${e}`;
+    } finally {
+      updChecking = false;
+    }
+  }
+
+  async function doInstall() {
+    if (!updateInfo) return;
+    updInstalling = true;
+    updStatus = "Downloading…";
+    try {
+      await installUpdate(updateInfo); // télécharge, installe, relance
+    } catch (e) {
+      updStatus = `Update failed: ${e}`;
+      updInstalling = false;
+    }
+  }
+
   async function saveAppSetting(key: keyof AppSettings, value: unknown) {
     (appSettings as Record<string, unknown>)[key] = value;
     if (key === "theme" || key === "accentColor") applyTheme();
@@ -522,7 +559,9 @@
         </div>
       </div>
 
-      <button class="appcog" onclick={openAppSettings}><span class="ic">⚙</span> Settings</button>
+      <button class="appcog" onclick={openAppSettings}>
+        <span class="ic">⚙</span> Settings{#if updateInfo}<span class="upddot" title="Update available"></span>{/if}
+      </button>
       <div class="count">{services.length} services · {workspaces.length} workspaces</div>
     </aside>
 
@@ -704,7 +743,7 @@
           </div>
 
           <div class="tabs">
-            {#each [["general", "General"], ["services", "Services"], ["appearance", "Appearance"], ["privacy", "Privacy"], ["advanced", "Advanced"]] as [id, label] (id)}
+            {#each [["general", "General"], ["services", "Services"], ["appearance", "Appearance"], ["privacy", "Privacy"], ["advanced", "Advanced"], ["updates", "Updates"]] as [id, label] (id)}
               <button
                 class="tab"
                 class:on={settingsTab === id}
@@ -852,6 +891,21 @@
             <div class="set-title">Server</div>
             <code class="recipe">{server}</code>
             <p class="sub">Signed in as {me.email}. Sign out to change server.</p>
+          {:else if settingsTab === "updates"}
+            <div class="set-title">Version</div>
+            <code class="recipe">Tauridium v{appVer}</code>
+            {#if updateInfo}
+              <p class="desc">A new version is available: <strong>v{updateInfo.version}</strong>.</p>
+              <button class="primary" disabled={updInstalling} onclick={doInstall}>
+                {updInstalling ? "Downloading & installing…" : `Update to v${updateInfo.version} & restart`}
+              </button>
+            {:else}
+              <button class="primary" disabled={updChecking} onclick={() => checkUpdates(false)}>
+                {updChecking ? "Checking…" : "Check for updates"}
+              </button>
+            {/if}
+            {#if updStatus}<p class="desc">{updStatus}</p>{/if}
+            <p class="sub">Updates are downloaded from GitHub Releases and verified with a signature.</p>
           {/if}
 
           {#if error}<p class="error">{error}</p>{/if}
@@ -1014,6 +1068,7 @@
     display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   }
   .appcog .ic { font-size: 19px; line-height: 1; }
+  .upddot { width: 8px; height: 8px; border-radius: 999px; background: #22c55e; display: inline-block; margin-left: 2px; }
   .appcog:hover { filter: brightness(1.1); }
   .count { font-size: 11px; color: var(--muted2); }
 
