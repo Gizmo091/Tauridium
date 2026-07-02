@@ -121,20 +121,40 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - name: Build the app & upload bundles to the release
-        uses: tauri-apps/tauri-action@v0
+      # Signature + notarisation macOS : activées UNIQUEMENT si le secret
+      # APPLE_CERTIFICATE est renseigné (sinon build non signé, ad-hoc). On écrit les
+      # variables dans $GITHUB_ENV pour l'étape suivante ; passer des APPLE_* vides
+      # ferait échouer tauri-action (security import d'un certificat vide).
+      - name: Configure macOS code signing (only when secrets exist)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signature + notarisation macOS. Inactif tant que ces secrets sont vides
-          # (build ad-hoc non signé) ; dès qu'ils sont renseignés, tauri-action signe
-          # avec le certificat Developer ID puis notarise auprès d'Apple. Ignorés sur
-          # Linux/Windows.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "Signing secrets found -> macOS build will be signed & notarized."
+            {
+              echo "APPLE_CERTIFICATE<<__EOF__"
+              echo "$APPLE_CERTIFICATE"
+              echo "__EOF__"
+              echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+          else
+            echo "No signing secrets -> macOS build will be unsigned (ad-hoc)."
+          fi
+      - name: Build the app & upload bundles to the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
