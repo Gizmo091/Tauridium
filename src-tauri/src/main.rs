@@ -36,6 +36,51 @@ const SIDEBAR_W: f64 = 240.0;
 // (ex. Synology Chat, cassé par un UA Chrome). L'override par recipe viendra plus tard.
 const SERVICE_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
+// UA « Chrome sans numéro de version » pour les hôtes Google sensibles (login, Gmail,
+// Google Chat) : contourne le « navigateur non supporté » de Google (repris de ferx).
+const GOOGLE_CHROMELESS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36";
+
+// Compat Google (spoof userAgentData / window.chrome / plugins / vendor…) injectée sur les
+// services Google non sensibles. Défensif (try/catch partout). Repris de ferx.
+const GOOGLE_AUTH_COMPAT_JS: &str = r#"(function() {
+  document.addEventListener('securitypolicyviolation', function(e) {
+    if (e.blockedURI && (e.blockedURI.indexOf('ipc:') !== -1 || e.blockedURI.indexOf('tauri:') !== -1)) { e.stopImmediatePropagation(); }
+  }, true);
+  try { Object.defineProperty(navigator, 'vendor', { get: function() { return 'Google Inc.'; }, configurable: true }); } catch(_) {}
+  try { Object.defineProperty(navigator, 'webdriver', { get: function() { return false; }, configurable: true }); } catch(_) {}
+  try { Object.defineProperty(navigator, 'pdfViewerEnabled', { get: function() { return true; }, configurable: true }); } catch(_) {}
+  var pluginNames = ['PDF Viewer','Chrome PDF Viewer','Chromium PDF Viewer','Microsoft Edge PDF Viewer','WebKit built-in PDF'];
+  var fakePlugins = { length: pluginNames.length, item: function(i) { return this[i] || null; }, namedItem: function(n) { for (var i = 0; i < this.length; i++) { if (this[i] && this[i].name === n) return this[i]; } return null; }, refresh: function() {} };
+  for (var i = 0; i < pluginNames.length; i++) fakePlugins[i] = Object.freeze({ name: pluginNames[i], filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1 });
+  try { Object.defineProperty(navigator, 'plugins', { get: function() { return fakePlugins; }, configurable: true }); } catch(_) {}
+  if (!window.chrome) {
+    try { Object.defineProperty(window, 'chrome', { value: { app: { isInstalled: false }, runtime: {}, csi: function(){return {};}, loadTimes: function(){return {};} }, writable: true, configurable: true }); } catch(_) {}
+  }
+  if (!navigator.userAgentData) {
+    var isMac = !(navigator.platform && navigator.platform.startsWith('Win'));
+    var brands = Object.freeze([ Object.freeze({ brand: 'Google Chrome', version: '135' }), Object.freeze({ brand: 'Not-A.Brand', version: '8' }), Object.freeze({ brand: 'Chromium', version: '135' }) ]);
+    try { Object.defineProperty(navigator, 'userAgentData', { value: Object.freeze({ brands: brands, mobile: false, platform: isMac ? 'macOS' : 'Windows', getHighEntropyValues: function() { return Promise.resolve({ brands: brands, mobile: false, platform: isMac ? 'macOS' : 'Windows', platformVersion: isMac ? '15.0.0' : '10.0.0', architecture: isMac ? 'arm' : 'x86', model: '', uaFullVersion: '135.0.0.0', fullVersionList: [{ brand: 'Google Chrome', version: '135.0.0.0' }, { brand: 'Chromium', version: '135.0.0.0' }] }); }, toJSON: function() { return { brands: brands, mobile: false, platform: isMac ? 'macOS' : 'Windows' }; } }), configurable: true, enumerable: true }); } catch(_) {}
+  }
+})();"#;
+
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+// Hôtes Google sensibles (login/Gmail/Chat) -> UA chromeless.
+fn is_google_auth_host(host: &str) -> bool {
+    ["gmail.com", "googlemail.com", "mail.google.com", "chat.google.com", "accounts.google.com"]
+        .iter()
+        .any(|d| host_matches(host, d))
+}
+
+// Services Google génériques -> injection du script de compat.
+fn is_google_host(host: &str) -> bool {
+    ["google.com", "gmail.com", "youtube.com", "googlevideo.com"]
+        .iter()
+        .any(|d| host_matches(host, d))
+}
+
 #[derive(Default)]
 struct AppState {
     server: Mutex<Option<String>>,
@@ -502,13 +547,13 @@ async fn show_service(
             let _ = wv.set_size(size);
         }
     } else {
-        let store = uuid_to_bytes(&service_id).ok_or("serviceId n'est pas un UUID")?;
+        let host = url.host_str().unwrap_or("").to_ascii_lowercase();
         // Runtime du recipe (scraping DOM des non-lus -> __pakeUnread) — best effort.
         let runtime = recipe_webview_js(&app_data, &recipe_id)
             .await
             .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
-        // UA : override par service, sinon override global, sinon SERVICE_UA (Safari
-        // moderne : satisfait WhatsApp >= 15 sans casser Synology).
+        // UA : override par service, sinon global, sinon UA chromeless pour les hôtes
+        // Google sensibles, sinon SERVICE_UA (Safari moderne pour WhatsApp/Synology).
         let ua = {
             let per_service = user_agent_pref
                 .as_deref()
@@ -517,27 +562,46 @@ async fn show_service(
             if let Some(p) = per_service {
                 p.to_string()
             } else {
-                let s = state.settings.lock().unwrap();
-                let global = s
+                let global = state
+                    .settings
+                    .lock()
+                    .unwrap()
                     .get("userAgentPref")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                if global.is_empty() {
-                    SERVICE_UA.to_string()
-                } else {
+                if !global.is_empty() {
                     global
+                } else if is_google_auth_host(&host) {
+                    GOOGLE_CHROMELESS_UA.to_string()
+                } else {
+                    SERVICE_UA.to_string()
                 }
             }
         };
         // Shim IPC injecté pour TOUS les services (comme Ferdium expose ipcRenderer à
-        // toutes ses webviews) : ceux qui en dépendent (Synology Chat…) ne crashent plus,
-        // les autres l'ignorent.
+        // toutes ses webviews) : ceux qui en dépendent (Synology Chat…) ne crashent plus.
         let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
-            .data_store_identifier(store)
             .user_agent(&ua)
             .initialization_script(IPC_SHIM_JS);
+        // Isolation du stockage par service : macOS -> data_store_identifier (data_directory
+        // ignoré) ; Windows/Linux -> data_directory dédié (sinon les sessions sont partagées).
+        #[cfg(target_os = "macos")]
+        {
+            let store = uuid_to_bytes(&service_id).ok_or("serviceId n'est pas un UUID")?;
+            builder = builder.data_store_identifier(store);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let dir = app_data.join("sessions").join(&service_id);
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        }
+        // Compat Google (userAgentData / window.chrome…) sur les services Google génériques.
+        if is_google_host(&host) && !is_google_auth_host(&host) {
+            builder = builder.initialization_script(GOOGLE_AUTH_COMPAT_JS);
+        }
         if let Some(rt) = runtime {
             builder = builder.initialization_script(rt);
         }
@@ -907,7 +971,8 @@ fn read_app_settings_value(app: &AppHandle) -> Value {
         "iconSize": 24,
         "grayscaleServices": false,
         "grayscaleDim": 50,
-        "sidebarServicesLocation": "top"
+        "sidebarServicesLocation": "top",
+        "hibernationTimer": 0
     });
     if let Some(p) = app_settings_path(app) {
         if let Ok(text) = std::fs::read_to_string(&p) {

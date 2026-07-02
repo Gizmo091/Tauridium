@@ -171,6 +171,7 @@ export interface AppSettings {
   grayscaleServices: boolean;
   grayscaleDim: number;
   sidebarServicesLocation: "top" | "center" | "bottom";
+  hibernationTimer: number;
   [k: string]: unknown;
 }
 

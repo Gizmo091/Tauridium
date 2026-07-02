@@ -78,6 +78,9 @@ jobs:
     needs: create-release
     strategy:
       fail-fast: false
+      # Builds sérialisés : évite toute écriture concurrente sur des artefacts partagés
+      # de release (ex. latest.json de l'updater). Compromis : release ~5x plus lente.
+      max-parallel: 1
       matrix:
         include:
           # macOS universel (Intel + Apple Silicon en un seul bundle).

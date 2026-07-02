@@ -74,7 +74,12 @@
     grayscaleServices: false,
     grayscaleDim: 50,
     sidebarServicesLocation: "top",
+    hibernationTimer: 0,
   });
+
+  // Hibernation : services mis en veille (webview fermée, session conservée).
+  let hibernated = $state<Set<string>>(new Set());
+  const hibTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Add service: full catalog loaded once, filtered live.
   let recipeQuery = $state("");
@@ -183,9 +188,45 @@
     }
   }
 
+  function clearHibTimer(sid: string) {
+    const t = hibTimers.get(sid);
+    if (t) {
+      clearTimeout(t);
+      hibTimers.delete(sid);
+    }
+  }
+
+  // Programme la mise en veille d'un service inactif éligible.
+  function scheduleHibernation(sid: string) {
+    clearHibTimer(sid);
+    const secs = appSettings.hibernationTimer;
+    const svc = services.find((s) => s.id === sid);
+    if (!secs || secs <= 0 || svc?.isHibernationEnabled !== true) return;
+    hibTimers.set(
+      sid,
+      setTimeout(() => {
+        hibTimers.delete(sid);
+        if (activeId === sid) return; // redevenu actif entre-temps
+        closeService(sid)
+          .then(() => {
+            hibernated = new Set(hibernated).add(sid);
+          })
+          .catch(() => {});
+      }, secs * 1000),
+    );
+  }
+
   function selectService(s: Service) {
+    const prev = activeId;
     view = "service";
     activeId = s.id;
+    clearHibTimer(s.id);
+    if (hibernated.has(s.id)) {
+      const next = new Set(hibernated);
+      next.delete(s.id);
+      hibernated = next;
+    }
+    if (prev && prev !== s.id) scheduleHibernation(prev);
     showService(s).catch((err) => {
       error = `Service "${s.name}": ${err}`;
     });
@@ -679,6 +720,22 @@
             {@render appToggle("Show disabled services", "Keep disabled services visible (dimmed) in the sidebar instead of hiding them.", "showDisabledServices", appSettings.showDisabledServices)}
             {@render appToggle("Show service names", "Show the name next to each service icon in the sidebar.", "showServiceName", appSettings.showServiceName)}
             {@render appToggle("Unread badge on muted services", "Still show the unread count on services that are muted.", "showMessageBadgeWhenMuted", appSettings.showMessageBadgeWhenMuted)}
+            <div class="setrow">
+              <label class="row-toggle">
+                <span>Hibernate inactive services</span>
+                <select
+                  class="select"
+                  bind:value={appSettings.hibernationTimer}
+                  onchange={() => saveAppSetting("hibernationTimer", appSettings.hibernationTimer)}
+                >
+                  <option value={0}>Off</option>
+                  <option value={30}>After 30s</option>
+                  <option value={60}>After 1 min</option>
+                  <option value={300}>After 5 min</option>
+                </select>
+              </label>
+              <p class="desc">Unload inactive services (per-service "Allow hibernation" must be on) to save memory. A hibernated service stops reporting unread until you reopen it.</p>
+            </div>
           {:else if settingsTab === "appearance"}
             <div class="setrow">
               <label class="row-toggle">
@@ -810,6 +867,7 @@
       class="srow"
       class:active={s.id === activeId && view === "service"}
       class:disabled={!s.isEnabled}
+      class:asleep={hibernated.has(s.id)}
       onclick={() => selectService(s)}
     >
       {#if failedIcons.has(s.id)}
@@ -820,6 +878,7 @@
       {#if appSettings.showServiceName}
         <span class="srow-name">{s.name}</span>
       {/if}
+      {#if hibernated.has(s.id)}<span class="zzz" title="Hibernated">💤</span>{/if}
       {#if (unreadMap[s.id] ?? 0) > 0 && (s.isMuted !== true || appSettings.showMessageBadgeWhenMuted)}
         <span class="ubadge" class:muted={s.isMuted === true}>
           {unreadMap[s.id] > 99 ? "99+" : unreadMap[s.id]}
@@ -932,6 +991,8 @@
   .srow:hover { background: var(--hover); }
   .srow.active { background: var(--accent); color: var(--accent-fg); }
   .srow.disabled { opacity: 0.45; }
+  .srow.asleep .svc-icon, .srow.asleep .dot { filter: grayscale(1); opacity: 0.5; }
+  .zzz { margin-left: auto; font-size: 12px; opacity: 0.8; }
   .svc-icon, .srow .dot { width: var(--icon-size, 22px); height: var(--icon-size, 22px); border-radius: 5px; object-fit: cover; flex: none; }
   .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
   :global(body.grayscale) .svc-icon { filter: grayscale(1); opacity: var(--gray-op, 0.6); transition: filter 0.15s, opacity 0.15s; }
