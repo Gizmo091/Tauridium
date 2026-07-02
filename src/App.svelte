@@ -562,7 +562,9 @@
       <button class="appcog" onclick={openAppSettings}>
         <span class="ic">⚙</span> Settings{#if updateInfo}<span class="upddot" title="Update available"></span>{/if}
       </button>
-      <div class="count">{services.length} services · {workspaces.length} workspaces</div>
+      <div class="count">
+        {services.length} services · {workspaces.length} workspaces{#if appVer} · <span class="ver">v{appVer}</span>{/if}
+      </div>
     </aside>
 
     <section class="stage">
@@ -1071,6 +1073,7 @@
   .upddot { width: 8px; height: 8px; border-radius: 999px; background: #22c55e; display: inline-block; margin-left: 2px; }
   .appcog:hover { filter: brightness(1.1); }
   .count { font-size: 11px; color: var(--muted2); }
+  .ver { font-weight: 700; color: var(--muted); }
 
   .stage { display: grid; place-items: center; overflow: auto; }
   .placeholder { text-align: center; color: var(--muted); }
