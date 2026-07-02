@@ -1,4 +1,8 @@
-# Tauridium
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="128" alt="Tauridium icon" />
+</p>
+
+<h1 align="center">Tauridium</h1>
 
 A lightweight desktop client for [Ferdium](https://ferdium.org), built with
 **Tauri v2** (Rust + native WebView) instead of Electron — while staying fully
