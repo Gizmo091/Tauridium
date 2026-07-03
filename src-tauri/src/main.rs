@@ -1284,6 +1284,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             // Cache des réglages app en mémoire (lu par le poller, la fermeture, etc.).

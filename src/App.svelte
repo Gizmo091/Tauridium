@@ -3,6 +3,13 @@
   import { listen } from "@tauri-apps/api/event";
   import { accentFg, iconSrc, filterRecipes, snapIconSize } from "./lib/ui";
   import { appVersion, checkForUpdate, installUpdate, type Update } from "./lib/updater";
+  import { ask } from "@tauri-apps/plugin-dialog";
+
+  // window.confirm() ne fonctionne pas dans WKWebView (wry n'implémente pas le panel JS)
+  // -> on passe par le dialogue natif du plugin dialog.
+  function confirmAsk(message: string): Promise<boolean> {
+    return ask(message, { title: "Tauridium", kind: "warning" });
+  }
   import {
     login,
     restoreSession,
@@ -362,7 +369,7 @@
   }
 
   async function handleDelete(s: Service) {
-    if (!confirm(`Delete service "${s.name}"?`)) return;
+    if (!(await confirmAsk(`Delete service "${s.name}"?`))) return;
     try {
       await deleteService(s.id);
       services = services.filter((x) => x.id !== s.id);
@@ -423,7 +430,7 @@
   }
 
   async function handleDeleteWorkspace(ws: Workspace) {
-    if (!confirm(`Delete workspace "${ws.name}"?`)) return;
+    if (!(await confirmAsk(`Delete workspace "${ws.name}"?`))) return;
     try {
       await deleteWorkspace(ws.id);
       if (activeWorkspace === ws.id) activeWorkspace = null;
