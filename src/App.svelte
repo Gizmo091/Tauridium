@@ -716,6 +716,7 @@
             <h2>Add a service</h2>
             <button class="link" onclick={backToService}>✕ close</button>
           </div>
+          <p class="notice">⚠️ Passkey / biometric sign-in (Touch ID, security keys) isn't supported in the embedded webview. On a service's login screen, choose "try another way" and use a password + authenticator code (TOTP) or a phone prompt instead.</p>
           <label class="block">
             Name (optional)
             <input bind:value={newServiceName} placeholder="leave empty = recipe name" />
@@ -1145,6 +1146,10 @@
   .row-toggle input { width: auto; }
   .setrow { display: flex; flex-direction: column; gap: 3px; }
   .desc { margin: 0 0 0 26px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+  .notice {
+    margin: 0; padding: 9px 11px; border-radius: 8px; font-size: 12px; line-height: 1.4;
+    background: rgba(217, 119, 6, 0.12); border: 1px solid rgba(217, 119, 6, 0.35); color: var(--text2);
+  }
   .select {
     margin-left: auto; padding: 6px 9px; border-radius: 8px;
     border: 1px solid var(--border2); background: var(--input); color: var(--text); font-size: 13px;

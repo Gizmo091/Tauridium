@@ -106,6 +106,16 @@ drag Tauridium to Applications, then either:
 **Linux**: `.deb` / `.rpm` / `.AppImage` (x86_64 and ARM64).
 **Windows**: `.msi` or `-setup.exe` (x64 and ARM64).
 
+## Known limitations
+
+- **Passkeys / biometric sign-in (Touch ID, security keys) don't work.** This is
+  a WebKit limitation: WebAuthn is disabled in an embedded `WKWebView` unless the
+  app holds Apple's restricted *Web Browser* entitlement (granted only to real
+  browsers). It affects every service, not just Google. **Workaround:** on the
+  login screen pick "try another way" and use a **password + an authenticator
+  code (TOTP) or a phone prompt** instead of a passkey. See
+  [tauri-apps/tauri#7926](https://github.com/tauri-apps/tauri/issues/7926).
+
 ## Status & caveats
 
 - Vibe-coded personal project — expect rough edges.
