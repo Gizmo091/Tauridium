@@ -121,6 +121,23 @@
       ? window.matchMedia("(prefers-color-scheme: dark)")
       : null;
 
+  // Formulations adaptées à l'OS (les descriptions de réglages en dépendent).
+  const osKind: "mac" | "win" | "linux" = /Mac|iPhone|iPad/.test(
+    navigator.userAgent,
+  )
+    ? "mac"
+    : /Win/.test(navigator.userAgent)
+      ? "win"
+      : "linux";
+  const trayWord = osKind === "mac" ? "menu bar" : "system tray";
+  const dockWord = osKind === "mac" ? "Dock" : "taskbar";
+  const loginText =
+    osKind === "mac"
+      ? "when you sign in to your Mac"
+      : osKind === "win"
+        ? "when you sign in to Windows"
+        : "when you log in";
+
   onMount(async () => {
     darkMq?.addEventListener("change", () => {
       if (appSettings.theme === "system") applyTheme();
@@ -638,7 +655,7 @@
           {@render toggle("Enabled", "Load this service. Disabled services stay listed but aren't loaded.", "isEnabled", settingsSvc.isEnabled !== false)}
           {@render toggle("Notifications", "Show system notifications for new messages in this service.", "isNotificationEnabled", settingsSvc.isNotificationEnabled !== false)}
           {@render toggle("Muted", "Silence this service — no notifications at all.", "isMuted", settingsSvc.isMuted === true)}
-          {@render toggle("Unread badge", "Count this service's unread messages in the dock badge.", "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
+          {@render toggle("Unread badge", `Count this service's unread messages in the ${dockWord} badge.`, "isBadgeEnabled", settingsSvc.isBadgeEnabled !== false)}
           {@render toggle("Indirect message badge", "Also count indirect (group / channel) messages in the badge.", "isIndirectMessageBadgeEnabled", settingsSvc.isIndirectMessageBadgeEnabled === true)}
           {@render toggle("Media badge", "Count calls / media activity in the badge.", "isMediaBadgeEnabled", settingsSvc.isMediaBadgeEnabled === true)}
           {@render toggle("Allow hibernation", "Let this service sleep when inactive to save memory.", "isHibernationEnabled", settingsSvc.isHibernationEnabled === true)}
@@ -779,9 +796,9 @@
           </div>
 
           {#if settingsTab === "general"}
-            {@render appToggle("Launch at login", "Start Tauridium automatically when you sign in to your Mac.", "autostart", appSettings.autostart)}
-            {@render appToggle("Start in background", "Launch with the window hidden — Tauridium stays in the tray/menu bar.", "startMinimized", appSettings.startMinimized)}
-            {@render appToggle("Close button hides to tray", "The window's close button hides Tauridium to the tray instead of quitting it.", "closeToSystemTray", appSettings.closeToSystemTray)}
+            {@render appToggle("Launch at login", `Start Tauridium automatically ${loginText}.`, "autostart", appSettings.autostart)}
+            {@render appToggle("Start in background", `Launch with the window hidden — Tauridium stays in the ${trayWord}.`, "startMinimized", appSettings.startMinimized)}
+            {@render appToggle("Close button hides to tray", `The window's close button hides Tauridium to the ${trayWord} instead of quitting it.`, "closeToSystemTray", appSettings.closeToSystemTray)}
           {:else if settingsTab === "services"}
             {@render appToggle("Show disabled services", "Keep disabled services visible (dimmed) in the sidebar instead of hiding them.", "showDisabledServices", appSettings.showDisabledServices)}
             {@render appToggle("Show service names", "Show the name next to each service icon in the sidebar.", "showServiceName", appSettings.showServiceName)}
