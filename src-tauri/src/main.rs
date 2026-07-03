@@ -525,6 +525,87 @@ const IPC_SHIM_JS: &str = r#"(function(){
 })();"#;
 
 #[tauri::command]
+// Crée (si absente) la webview d'un service à la position/taille données. Les fetchs de
+// recette (config + webview.js) ne sont faits QU'ICI (création) — plus à chaque bascule.
+#[allow(clippy::too_many_arguments)]
+async fn create_service_webview(
+    state: &State<'_, AppState>,
+    win: &tauri::window::Window<Wry>,
+    app_data: &Path,
+    service_id: &str,
+    recipe_id: &str,
+    custom_url: Option<&str>,
+    team: Option<&str>,
+    user_agent_pref: Option<&str>,
+    pos: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    let cfg = recipe_config(app_data, recipe_id).await?;
+    let url_str = resolve_url(&cfg, custom_url, team)?;
+    let url = Url::parse(&url_str).map_err(|e| format!("URL invalide « {url_str} » : {e}"))?;
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    // Runtime du recipe (scraping DOM des non-lus -> __pakeUnread) — best effort.
+    let runtime = recipe_webview_js(app_data, recipe_id)
+        .await
+        .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
+    let label = format!("svc-{service_id}");
+
+    // UA : override par service, sinon global, sinon chromeless Google, sinon SERVICE_UA.
+    let ua = {
+        let per_service = user_agent_pref.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(p) = per_service {
+            p.to_string()
+        } else {
+            let global = state
+                .settings
+                .lock()
+                .unwrap()
+                .get("userAgentPref")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !global.is_empty() {
+                global
+            } else if is_google_auth_host(&host) {
+                GOOGLE_CHROMELESS_UA.to_string()
+            } else {
+                SERVICE_UA.to_string()
+            }
+        }
+    };
+
+    // Shim IPC injecté pour TOUS les services (Synology Chat… en dépendent).
+    let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
+        .user_agent(&ua)
+        .initialization_script(IPC_SHIM_JS);
+    // Isolation du stockage par service : macOS -> data_store_identifier (data_directory
+    // ignoré) ; Windows/Linux -> data_directory dédié (sinon sessions partagées).
+    #[cfg(target_os = "macos")]
+    {
+        let store = uuid_to_bytes(service_id).ok_or("serviceId n'est pas un UUID")?;
+        builder = builder.data_store_identifier(store);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let dir = app_data.join("sessions").join(service_id);
+        let _ = std::fs::create_dir_all(&dir);
+        builder = builder.data_directory(dir);
+    }
+    // Compat Google (userAgentData / window.chrome…) sur les services Google génériques.
+    if is_google_host(&host) && !is_google_auth_host(&host) {
+        builder = builder.initialization_script(GOOGLE_AUTH_COMPAT_JS);
+    }
+    if let Some(rt) = runtime {
+        builder = builder.initialization_script(rt);
+    }
+    win.add_child(builder, pos, size)
+        .map_err(|e| format!("Création de la webview du service échouée : {e}"))?;
+    state.created.lock().unwrap().insert(service_id.to_string());
+    Ok(())
+}
+
+#[tauri::command]
 async fn show_service(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -534,11 +615,6 @@ async fn show_service(
     team: Option<String>,
     user_agent_pref: Option<String>,
 ) -> Result<(), String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let cfg = recipe_config(&app_data, &recipe_id).await?;
-    let url_str = resolve_url(&cfg, custom_url.as_deref(), team.as_deref())?;
-    let url = Url::parse(&url_str).map_err(|e| format!("URL invalide « {url_str} » : {e}"))?;
-
     let win = app
         .get_window("main")
         .ok_or("Fenêtre principale introuvable")?;
@@ -548,72 +624,26 @@ async fn show_service(
 
     let exists = state.created.lock().unwrap().contains(&service_id);
     if exists {
+        // Déjà chargé (ou préchargé) : simple repositionnement, aucun fetch réseau.
         if let Some(wv) = app.get_webview(&label) {
             let _ = wv.set_position(pos);
             let _ = wv.set_size(size);
         }
     } else {
-        let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-        // Runtime du recipe (scraping DOM des non-lus -> __pakeUnread) — best effort.
-        let runtime = recipe_webview_js(&app_data, &recipe_id)
-            .await
-            .map(|js| format!("{RECIPE_PREAMBLE}{js}{RECIPE_SUFFIX}"));
-        // UA : override par service, sinon global, sinon UA chromeless pour les hôtes
-        // Google sensibles, sinon SERVICE_UA (Safari moderne pour WhatsApp/Synology).
-        let ua = {
-            let per_service = user_agent_pref
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            if let Some(p) = per_service {
-                p.to_string()
-            } else {
-                let global = state
-                    .settings
-                    .lock()
-                    .unwrap()
-                    .get("userAgentPref")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !global.is_empty() {
-                    global
-                } else if is_google_auth_host(&host) {
-                    GOOGLE_CHROMELESS_UA.to_string()
-                } else {
-                    SERVICE_UA.to_string()
-                }
-            }
-        };
-        // Shim IPC injecté pour TOUS les services (comme Ferdium expose ipcRenderer à
-        // toutes ses webviews) : ceux qui en dépendent (Synology Chat…) ne crashent plus.
-        let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
-            .user_agent(&ua)
-            .initialization_script(IPC_SHIM_JS);
-        // Isolation du stockage par service : macOS -> data_store_identifier (data_directory
-        // ignoré) ; Windows/Linux -> data_directory dédié (sinon les sessions sont partagées).
-        #[cfg(target_os = "macos")]
-        {
-            let store = uuid_to_bytes(&service_id).ok_or("serviceId n'est pas un UUID")?;
-            builder = builder.data_store_identifier(store);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let dir = app_data.join("sessions").join(&service_id);
-            let _ = std::fs::create_dir_all(&dir);
-            builder = builder.data_directory(dir);
-        }
-        // Compat Google (userAgentData / window.chrome…) sur les services Google génériques.
-        if is_google_host(&host) && !is_google_auth_host(&host) {
-            builder = builder.initialization_script(GOOGLE_AUTH_COMPAT_JS);
-        }
-        if let Some(rt) = runtime {
-            builder = builder.initialization_script(rt);
-        }
-        win.add_child(builder, pos, size)
-            .map_err(|e| format!("Création de la webview du service échouée : {e}"))?;
-        state.created.lock().unwrap().insert(service_id.clone());
+        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        create_service_webview(
+            &state,
+            &win,
+            &app_data,
+            &service_id,
+            &recipe_id,
+            custom_url.as_deref(),
+            team.as_deref(),
+            user_agent_pref.as_deref(),
+            pos,
+            size,
+        )
+        .await?;
     }
 
     // Affiche le service demandé, masque les autres.
@@ -628,6 +658,48 @@ async fn show_service(
         }
     }
     *state.active.lock().unwrap() = Some(service_id);
+    Ok(())
+}
+
+// Précharge un service EN ARRIÈRE-PLAN : crée sa webview hors-écran (elle charge la page)
+// sans devenir active. Le passage ultérieur à ce service est alors quasi instantané.
+#[tauri::command]
+async fn preload_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    service_id: String,
+    recipe_id: String,
+    custom_url: Option<String>,
+    team: Option<String>,
+    user_agent_pref: Option<String>,
+) -> Result<(), String> {
+    if state.created.lock().unwrap().contains(&service_id) {
+        return Ok(());
+    }
+    let win = app
+        .get_window("main")
+        .ok_or("Fenêtre principale introuvable")?;
+    let sw = *state.sidebar_w.lock().unwrap();
+    let (_, size) = service_rect(&win, sw)?;
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Hors-écran : la webview charge la page sans jamais recouvrir le service actif.
+    let offscreen = LogicalPosition::new(-30000.0, 0.0);
+    create_service_webview(
+        &state,
+        &win,
+        &app_data,
+        &service_id,
+        &recipe_id,
+        custom_url.as_deref(),
+        team.as_deref(),
+        user_agent_pref.as_deref(),
+        offscreen,
+        size,
+    )
+    .await?;
+    if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
+        let _ = wv.hide();
+    }
     Ok(())
 }
 
@@ -978,7 +1050,8 @@ fn read_app_settings_value(app: &AppHandle) -> Value {
         "grayscaleServices": false,
         "grayscaleDim": 50,
         "sidebarServicesLocation": "top",
-        "hibernationTimer": 0
+        "hibernationTimer": 0,
+        "preloadServices": true
     });
     if let Some(p) = app_settings_path(app) {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -1075,6 +1148,37 @@ fn toggle_devtools(app: &AppHandle) {
     #[cfg(not(debug_assertions))]
     {
         let _ = app;
+    }
+}
+
+// Recharge la webview du service actif (comme « Reload service » de Ferdium).
+fn reload_active_service(app: &AppHandle) {
+    let active = app.state::<AppState>().active.lock().unwrap().clone();
+    if let Some(sid) = active {
+        if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
+            let _ = wv.reload();
+        }
+    }
+}
+
+// Recharge le shell (l'UI de l'app) — comme « Reload Ferdium ». On masque d'abord les
+// services (le shell se réaffiche puis re-sélectionne le service actif au montage).
+fn reload_app(app: &AppHandle) {
+    let created: Vec<String> = app
+        .state::<AppState>()
+        .created
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    for sid in created {
+        if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
+            let _ = wv.hide();
+        }
+    }
+    if let Some(wv) = app.get_webview("main") {
+        let _ = wv.reload();
     }
 }
 
@@ -1284,6 +1388,20 @@ fn main() {
                         &PredefinedMenuItem::select_all(app, None)?,
                     ],
                 )?;
+                let reload_svc = MenuItem::with_id(
+                    app,
+                    "reload-service",
+                    "Reload Service",
+                    true,
+                    Some("CmdOrCtrl+R"),
+                )?;
+                let reload_app_item = MenuItem::with_id(
+                    app,
+                    "reload-app",
+                    "Reload Tauridium",
+                    true,
+                    Some("CmdOrCtrl+Shift+R"),
+                )?;
                 let devtools = MenuItem::with_id(
                     app,
                     "toggle-devtools",
@@ -1291,13 +1409,24 @@ fn main() {
                     true,
                     Some("CmdOrCtrl+Alt+I"),
                 )?;
-                let view = Submenu::with_items(app, "View", true, &[&devtools])?;
+                let view = Submenu::with_items(
+                    app,
+                    "View",
+                    true,
+                    &[
+                        &reload_svc,
+                        &reload_app_item,
+                        &PredefinedMenuItem::separator(app)?,
+                        &devtools,
+                    ],
+                )?;
                 let menu = Menu::with_items(app, &[&app_sub, &edit, &view])?;
                 app.set_menu(menu)?;
-                app.on_menu_event(|app, event| {
-                    if event.id.as_ref() == "toggle-devtools" {
-                        toggle_devtools(app);
-                    }
+                app.on_menu_event(|app, event| match event.id.as_ref() {
+                    "toggle-devtools" => toggle_devtools(app),
+                    "reload-service" => reload_active_service(app),
+                    "reload-app" => reload_app(app),
+                    _ => {}
                 });
             }
 
@@ -1329,6 +1458,7 @@ fn main() {
             get_services,
             get_workspaces,
             show_service,
+            preload_service,
             hide_all_services,
             close_service,
             set_sidebar_width,

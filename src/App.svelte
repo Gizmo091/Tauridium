@@ -10,6 +10,7 @@
     getWorkspaces,
     logout,
     showService,
+    preloadService,
     closeService,
     closeServices,
     hideServices,
@@ -83,6 +84,7 @@
     grayscaleDim: 50,
     sidebarServicesLocation: "top",
     hibernationTimer: 0,
+    preloadServices: true,
   });
 
   // Hibernation : services mis en veille (webview fermée, session conservée).
@@ -183,6 +185,29 @@
     await Promise.all(services.map((s) => setServiceFlags(s).catch(() => {})));
     const first = sorted.find((s) => s.isEnabled) ?? sorted[0] ?? null;
     if (first) selectService(first);
+    preloadRest(first?.id);
+  }
+
+  // Précharge (webviews hors-écran) les autres services actifs, en douceur (échelonné),
+  // pour que la bascule vers l'un d'eux soit quasi instantanée. On saute ceux voués à
+  // l'hibernation (ils seraient déchargés) et on respecte le réglage.
+  function preloadRest(firstId: string | undefined) {
+    if (!appSettings.preloadServices) return;
+    const list = sorted.filter(
+      (s) =>
+        s.isEnabled &&
+        s.id !== firstId &&
+        !(appSettings.hibernationTimer > 0 && s.isHibernationEnabled === true),
+    );
+    let i = 0;
+    const step = () => {
+      const s = list[i++];
+      if (!s) return;
+      preloadService(s)
+        .catch(() => {})
+        .finally(() => setTimeout(step, 700));
+    };
+    setTimeout(step, 1500); // laisse le service actif se charger d'abord
   }
 
   async function handleLogin(e: Event) {
@@ -777,6 +802,7 @@
               </label>
               <p class="desc">Unload inactive services (per-service "Allow hibernation" must be on) to save memory. A hibernated service stops reporting unread until you reopen it.</p>
             </div>
+            {@render appToggle("Preload services at startup", "Load your services in the background right after launch so switching to them is instant (uses more memory).", "preloadServices", appSettings.preloadServices)}
           {:else if settingsTab === "appearance"}
             <div class="setrow">
               <label class="row-toggle">

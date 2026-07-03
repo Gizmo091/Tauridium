@@ -98,6 +98,17 @@ export function showService(s: Service): Promise<void> {
   });
 }
 
+// Précharge un service en arrière-plan (webview hors-écran) pour une bascule instantanée.
+export function preloadService(s: Service): Promise<void> {
+  return invoke("preload_service", {
+    serviceId: s.id,
+    recipeId: s.recipeId,
+    customUrl: (s.customUrl as string | undefined) ?? null,
+    team: (s.team as string | undefined) ?? null,
+    userAgentPref: (s.userAgentPref as string | undefined) ?? null,
+  });
+}
+
 export function closeService(serviceId: string): Promise<void> {
   return invoke("close_service", { serviceId });
 }
@@ -172,6 +183,7 @@ export interface AppSettings {
   grayscaleDim: number;
   sidebarServicesLocation: "top" | "center" | "bottom";
   hibernationTimer: number;
+  preloadServices: boolean;
   [k: string]: unknown;
 }
 
