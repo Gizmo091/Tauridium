@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# Tait les DeprecationWarning de Node (punycode / url.parse) émis par les actions
+# tierces (rust-cache, setup-node) sur Node 24 — non corrigeables de notre côté.
+env:
+  NODE_OPTIONS: --no-deprecation
+
 jobs:
   # 1) Gate : les tests doivent passer avant de compiler quoi que ce soit.
   test:

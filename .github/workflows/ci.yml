@@ -11,6 +11,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Tait les DeprecationWarning de Node (punycode / url.parse) émis par les actions
+# tierces (rust-cache, setup-node) sur Node 24 — non corrigeables de notre côté.
+env:
+  NODE_OPTIONS: --no-deprecation
+
 jobs:
   frontend:
     name: Frontend (check · test · build)
