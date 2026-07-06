@@ -88,6 +88,18 @@ export function logout(): Promise<void> {
 }
 
 // Phase 2 : affiche le service actif dans une webview enfant isolée.
+// Réglages dark mode envoyés au backend (null si désactivé -> pas d'injection Dark Reader).
+function darkArg(s: Service) {
+  return s.isDarkModeEnabled
+    ? {
+        enabled: true,
+        brightness: s.darkReaderBrightness ?? null,
+        contrast: s.darkReaderContrast ?? null,
+        sepia: s.darkReaderSepia ?? null,
+      }
+    : null;
+}
+
 export function showService(s: Service): Promise<void> {
   return invoke("show_service", {
     serviceId: s.id,
@@ -95,6 +107,7 @@ export function showService(s: Service): Promise<void> {
     customUrl: (s.customUrl as string | undefined) ?? null,
     team: (s.team as string | undefined) ?? null,
     userAgentPref: (s.userAgentPref as string | undefined) ?? null,
+    dark: darkArg(s),
   });
 }
 
@@ -106,6 +119,7 @@ export function preloadService(s: Service): Promise<void> {
     customUrl: (s.customUrl as string | undefined) ?? null,
     team: (s.team as string | undefined) ?? null,
     userAgentPref: (s.userAgentPref as string | undefined) ?? null,
+    dark: darkArg(s),
   });
 }
 

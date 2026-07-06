@@ -499,10 +499,19 @@
   }
 
   // Les handlers ne modifient QUE l'état local ; le Save persiste tout d'un coup.
+  // Champs dont le changement exige de recréer la webview (script injecté à la création).
+  const RELOAD_FIELDS = new Set<keyof Service>([
+    "isDarkModeEnabled",
+    "darkReaderBrightness",
+    "darkReaderContrast",
+    "darkReaderSepia",
+  ]);
+
   function saveSetting(key: keyof Service, value: boolean) {
     if (!settingsSvc) return;
     (settingsSvc as Record<string, unknown>)[key] = value;
     svcDirty = true;
+    if (RELOAD_FIELDS.has(key)) svcReload = true;
   }
 
   function saveText(key: keyof Service, value: string, reload = false) {
@@ -517,6 +526,7 @@
     const n = Number.parseInt(value, 10);
     (settingsSvc as Record<string, unknown>)[key] = Number.isNaN(n) ? undefined : n;
     svcDirty = true;
+    if (RELOAD_FIELDS.has(key)) svcReload = true;
   }
 
   async function saveServiceSettings() {
@@ -892,7 +902,7 @@
           {@render toggle("Only favorites in unread count", "Count unread messages only from favorite chats in this service.", "onlyShowFavoritesInUnreadCount", settingsSvc.onlyShowFavoritesInUnreadCount === true)}
 
           <div class="set-title">Appearance</div>
-          {@render toggle("Dark mode", "Apply the recipe's dark theme to this service (synced with Ferdium).", "isDarkModeEnabled", settingsSvc.isDarkModeEnabled === true)}
+          {@render toggle("Dark mode", "Force a dark theme on this service (via Dark Reader). Reloads the service when changed.", "isDarkModeEnabled", settingsSvc.isDarkModeEnabled === true)}
           {#if settingsSvc.isDarkModeEnabled}
             <div class="setrow">
               <div class="num-row">
@@ -903,8 +913,8 @@
               <p class="desc">Dark Reader fine-tuning (applies to this service's dark mode).</p>
             </div>
           {/if}
-          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon.", "useFavicon", settingsSvc.useFavicon === true)}
-          {@render toggle("Progress bar", "Show a loading progress bar for this service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
+          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon (synced with Ferdium; not rendered locally yet).", "useFavicon", settingsSvc.useFavicon === true)}
+          {@render toggle("Progress bar", "Ferdium setting (synced). Tauridium already shows a loading spinner per service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
           <div class="setrow">
             <label class="block">
               Custom user agent

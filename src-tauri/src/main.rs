@@ -415,6 +415,48 @@ fn resolve_url(
 // code de scraping DOM du recipe ; `setBadge` alimente window.__pakeUnread (lu par le
 // poller). injectCSS/notifs viendront plus tard ; tout est encapsulé dans un try/catch
 // pour qu'un recipe incompatible ne casse jamais la page.
+// Dark Reader (build UMD standalone, vendoré) — injecté par service quand le dark mode
+// est activé, pour vraiment assombrir la page (avant : la case ne faisait rien localement).
+const DARK_READER_JS: &str = include_str!("../assets/darkreader.js");
+
+// Options Dark Reader d'un service (valeurs par défaut alignées sur l'UI : 100/90/10).
+#[derive(Clone, Copy)]
+struct DarkOpts {
+    brightness: i64,
+    contrast: i64,
+    sepia: i64,
+}
+
+// Réglages dark mode reçus du frontend (via showService/preloadService).
+#[derive(serde::Deserialize)]
+struct DarkSettings {
+    enabled: bool,
+    brightness: Option<i64>,
+    contrast: Option<i64>,
+    sepia: Option<i64>,
+}
+
+impl DarkSettings {
+    fn to_opts(self) -> Option<DarkOpts> {
+        if !self.enabled {
+            return None;
+        }
+        Some(DarkOpts {
+            brightness: self.brightness.unwrap_or(100),
+            contrast: self.contrast.unwrap_or(90),
+            sepia: self.sepia.unwrap_or(10),
+        })
+    }
+}
+
+// Script d'activation Dark Reader : charge la lib puis applique le thème sombre.
+fn dark_reader_init(o: DarkOpts) -> String {
+    format!(
+        "{DARK_READER_JS}\ntry{{DarkReader.enable({{brightness:{},contrast:{},sepia:{}}});}}catch(e){{}}",
+        o.brightness, o.contrast, o.sepia
+    )
+}
+
 const RECIPE_PREAMBLE: &str = r#"(function(){
   try {
     var module = { exports: {} };
@@ -614,6 +656,7 @@ async fn create_service_webview(
     custom_url: Option<&str>,
     team: Option<&str>,
     user_agent_pref: Option<&str>,
+    dark: Option<DarkOpts>,
     pos: LogicalPosition<f64>,
     size: LogicalSize<f64>,
 ) -> Result<(), String> {
@@ -688,6 +731,10 @@ async fn create_service_webview(
     if let Some(rt) = runtime {
         builder = builder.initialization_script(rt);
     }
+    // Dark mode par service : injecte Dark Reader + l'active (best effort).
+    if let Some(o) = dark {
+        builder = builder.initialization_script(dark_reader_init(o));
+    }
     win.add_child(builder, pos, size)
         .map_err(|e| format!("Création de la webview du service échouée : {e}"))?;
     state.created.lock().unwrap().insert(service_id.to_string());
@@ -703,7 +750,9 @@ async fn show_service(
     custom_url: Option<String>,
     team: Option<String>,
     user_agent_pref: Option<String>,
+    dark: Option<DarkSettings>,
 ) -> Result<(), String> {
+    let dark = dark.and_then(DarkSettings::to_opts);
     let win = app
         .get_window("main")
         .ok_or("Fenêtre principale introuvable")?;
@@ -745,6 +794,7 @@ async fn show_service(
                 custom_url.as_deref(),
                 team.as_deref(),
                 user_agent_pref.as_deref(),
+                dark,
                 pos,
                 size,
             )
@@ -786,7 +836,9 @@ async fn preload_service(
     custom_url: Option<String>,
     team: Option<String>,
     user_agent_pref: Option<String>,
+    dark: Option<DarkSettings>,
 ) -> Result<(), String> {
+    let dark = dark.and_then(DarkSettings::to_opts);
     if state.created.lock().unwrap().contains(&service_id) {
         return Ok(());
     }
@@ -832,6 +884,7 @@ async fn preload_service(
         custom_url.as_deref(),
         team.as_deref(),
         user_agent_pref.as_deref(),
+        dark,
         offscreen,
         size,
     )
