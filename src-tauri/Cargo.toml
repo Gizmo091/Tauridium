@@ -9,6 +9,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
+# Accès direct à l'API bas niveau de wry (remove_data_store macOS) pour purger le
+# WKWebsiteDataStore d'un service supprimé. Redirigé vers ../vendor/wry par le patch.
+wry = "0.55"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

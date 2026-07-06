@@ -146,6 +146,11 @@ export function deleteService(serviceId: string): Promise<void> {
   return invoke("delete_service", { serviceId });
 }
 
+// Vide le cache/la session d'un service (ferme sa webview + purge son stockage disque).
+export function clearServiceCache(serviceId: string): Promise<void> {
+  return invoke("clear_service_cache", { serviceId });
+}
+
 export function listRecipes(): Promise<RecipePreview[]> {
   return invoke("list_recipes");
 }

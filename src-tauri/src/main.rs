@@ -483,6 +483,26 @@ fn uuid_to_bytes(s: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+// Purge le stockage persistant (cookies, localStorage, session) d'un service. À appeler
+// APRÈS avoir fermé sa webview. macOS : suppression du WKWebsiteDataStore par identifiant
+// (API wry, thread principal requis) ; ailleurs : suppression du dossier data_directory.
+#[cfg(target_os = "macos")]
+fn purge_service_storage(app: &AppHandle, service_id: &str) {
+    use wry::WebViewExtDarwin;
+    if let Some(uuid) = uuid_to_bytes(service_id) {
+        let _ = app.run_on_main_thread(move || {
+            <wry::WebView as WebViewExtDarwin>::remove_data_store(&uuid, |_| {});
+        });
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn purge_service_storage(app: &AppHandle, service_id: &str) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::remove_dir_all(dir.join("sessions").join(service_id));
+    }
+}
+
 // Rectangle (logique) de la zone service = tout à droite de la sidebar.
 fn service_rect(
     win: &tauri::window::Window<Wry>,
@@ -961,7 +981,27 @@ async fn delete_service(
     state.created.lock().unwrap().remove(&service_id);
     state.unread.lock().unwrap().remove(&service_id);
     state.flags.lock().unwrap().remove(&service_id);
+    // Purge la session/cookies du service sur disque (fuite disque + vie privée sinon).
+    purge_service_storage(&app, &service_id);
     Ok(())
+}
+
+// Vide le cache/la session d'un service SANS le supprimer du serveur : ferme sa webview
+// et purge son stockage. Le service se rouvrira « propre » (déconnecté) au prochain accès.
+#[tauri::command]
+fn clear_service_cache(app: AppHandle, state: State<'_, AppState>, service_id: String) {
+    if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
+        let _ = wv.close();
+    }
+    state.created.lock().unwrap().remove(&service_id);
+    state.unread.lock().unwrap().remove(&service_id);
+    if state.active.lock().unwrap().as_deref() == Some(service_id.as_str()) {
+        *state.active.lock().unwrap() = None;
+    }
+    if state.desired_active.lock().unwrap().as_deref() == Some(service_id.as_str()) {
+        *state.desired_active.lock().unwrap() = None;
+    }
+    purge_service_storage(&app, &service_id);
 }
 
 // Catalogue complet de recipes -> GET /v1/recipes. Le filtre se fait côté frontend.
@@ -1606,6 +1646,7 @@ fn main() {
             update_service,
             create_service,
             delete_service,
+            clear_service_cache,
             list_recipes,
             create_workspace,
             update_workspace,

@@ -25,6 +25,7 @@
     updateService,
     createService,
     deleteService,
+    clearServiceCache,
     listRecipes,
     createWorkspace,
     updateWorkspace,
@@ -485,6 +486,25 @@
     }
   }
 
+  async function handleClearCache(s: Service) {
+    if (
+      !(await confirmAsk(
+        `Clear cache & session for "${s.name}"? You'll be signed out of this service.`,
+      ))
+    )
+      return;
+    try {
+      await clearServiceCache(s.id);
+      clearHibTimer(s.id);
+      const { [s.id]: _, ...rest } = statusMap;
+      statusMap = rest;
+      hibernated = new Set([...hibernated].filter((id) => id !== s.id));
+      backToService(); // se rouvrira « propre » (déconnecté)
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   function openWorkspaces() {
     error = null;
     view = "workspaces";
@@ -854,9 +874,26 @@
           {/if}
 
           {#if error}<p class="error">{error}</p>{/if}
-          <button class="danger" onclick={() => settingsSvc && handleDelete(settingsSvc)}>
-            Delete this service
-          </button>
+          <div class="danger-zone">
+            <div class="dz-row">
+              <div>
+                <strong>Clear cache & session</strong>
+                <p class="dz-hint">Sign out of this service and wipe its cookies/storage from disk. The service stays in your list.</p>
+              </div>
+              <button class="danger sm" onclick={() => settingsSvc && handleClearCache(settingsSvc)}>
+                Clear cache
+              </button>
+            </div>
+            <div class="dz-row">
+              <div>
+                <strong>Delete service</strong>
+                <p class="dz-hint">Remove this service from your account and wipe its data.</p>
+              </div>
+              <button class="danger sm" onclick={() => settingsSvc && handleDelete(settingsSvc)}>
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       {:else if view === "add"}
         <div class="panel">
@@ -1331,6 +1368,12 @@
   .proxy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .danger { margin-top: 6px; background: #3a2330; border: 1px solid #6e2b3e; color: #ff9aa8; border-radius: 8px; padding: 9px; cursor: pointer; }
   .danger:hover { filter: brightness(1.15); }
+  .danger.sm { margin-top: 0; padding: 6px 12px; font-size: 13px; white-space: nowrap; align-self: center; }
+  .danger-zone { margin-top: 16px; border: 1px solid #6e2b3e; border-radius: 10px; overflow: hidden; }
+  .dz-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
+  .dz-row + .dz-row { border-top: 1px solid #6e2b3e; }
+  .dz-row strong { font-size: 14px; }
+  .dz-hint { margin: 3px 0 0; font-size: 12px; color: var(--muted); max-width: 380px; }
   .results { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
   .result {
     display: flex; justify-content: space-between; align-items: center;
