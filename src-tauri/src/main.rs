@@ -13,7 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewBuilder;
@@ -25,6 +26,16 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+// Client HTTP partagé (pooling de connexions) AVEC timeouts : sans timeout, un serveur
+// qui accepte la connexion mais ne répond jamais fait pendre login/show_service à l'infini.
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap_or_default()
+});
 
 // User-agent pour les appels API serveur Ferdium / récupération des recipes.
 const API_UA: &str = concat!("Tauridium/", env!("CARGO_PKG_VERSION"));
@@ -129,8 +140,17 @@ fn normalize_server(server: &str) -> String {
     server.trim().trim_end_matches('/').to_string()
 }
 
+// Écriture atomique : .tmp puis rename. Évite un fichier tronqué si l'app crashe pendant
+// l'écriture (sinon session.json / app_settings.json peuvent devenir illisibles).
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
 async fn api_get(base: &str, token: &str, path: &str) -> Result<Value, String> {
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .get(format!("{base}{path}"))
         .bearer_auth(token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -154,7 +174,7 @@ fn save_session(app: &AppHandle, server: &str, token: &str) {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("session.json");
     let data = serde_json::json!({ "server": server, "token": token }).to_string();
-    if std::fs::write(&path, data).is_ok() {
+    if write_atomic(&path, &data).is_ok() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -180,7 +200,8 @@ async fn login(
     let base = normalize_server(&server);
     let password_hash = ferdium_password_hash(&password);
 
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .post(format!("{base}/v1/auth/login"))
         .basic_auth(&email, Some(&password_hash))
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -239,7 +260,8 @@ async fn restore_session(app: AppHandle, state: State<'_, AppState>) -> Result<V
     // On valide le token, mais on ne supprime la session QUE si le serveur la refuse
     // vraiment (401/403). Une erreur réseau ou serveur transitoire (5xx, blip au reload)
     // NE DOIT PAS déconnecter — sinon un simple reload peut effacer une session valide.
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .get(format!("{server}/v1/me"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -320,7 +342,8 @@ async fn recipe_config(app_data: &Path, recipe_id: &str) -> Result<Value, String
     let url = format!(
         "https://raw.githubusercontent.com/ferdium/ferdium-recipes/main/recipes/{recipe_id}/package.json"
     );
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .get(&url)
         .header(reqwest::header::USER_AGENT, API_UA)
         .send()
@@ -428,7 +451,8 @@ async fn recipe_webview_js(app_data: &Path, recipe_id: &str) -> Option<String> {
     let url = format!(
         "https://raw.githubusercontent.com/ferdium/ferdium-recipes/main/recipes/{recipe_id}/webview.js"
     );
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .get(&url)
         .header(reqwest::header::USER_AGENT, API_UA)
         .send()
@@ -808,7 +832,8 @@ async fn update_service(
     patch: Value,
 ) -> Result<Value, String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .put(format!("{base}/v1/service/{service_id}"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -830,7 +855,8 @@ async fn create_service(
     recipe_id: String,
 ) -> Result<Value, String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .post(format!("{base}/v1/service"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -852,7 +878,8 @@ async fn delete_service(
     service_id: String,
 ) -> Result<(), String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .delete(format!("{base}/v1/service/{service_id}"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -876,7 +903,8 @@ async fn delete_service(
 #[tauri::command]
 async fn list_recipes(state: State<'_, AppState>) -> Result<Value, String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .get(format!("{base}/v1/recipes"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -894,7 +922,8 @@ async fn list_recipes(state: State<'_, AppState>) -> Result<Value, String> {
 #[tauri::command]
 async fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Value, String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .post(format!("{base}/v1/workspace"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -916,7 +945,8 @@ async fn update_workspace(
     services: Vec<String>,
 ) -> Result<Value, String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .put(format!("{base}/v1/workspace/{workspace_id}"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -933,7 +963,8 @@ async fn update_workspace(
 #[tauri::command]
 async fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<(), String> {
     let (base, token) = current(&state)?;
-    let res = reqwest::Client::new()
+    let res = HTTP
+        .clone()
         .delete(format!("{base}/v1/workspace/{workspace_id}"))
         .bearer_auth(&token)
         .header(reqwest::header::USER_AGENT, API_UA)
@@ -1028,9 +1059,17 @@ fn start_badge_poller(app: AppHandle) {
 
                     // Stocke le brut par service (pour la sidebar), calcule le total dock
                     // (flags appliqués) et émet la carte des non-lus vers le shell.
+                    // Le service a pu être fermé/hiberné/supprimé entre le snapshot et ce
+                    // callback async : dans ce cas on ne le (ré)insère PAS (sinon il resterait
+                    // dans le total pour toujours = badge dock fantôme).
+                    let still_exists = st.created.lock().unwrap().contains(&sid);
                     let (map, total) = {
                         let mut m = st.unread.lock().unwrap();
-                        m.insert(sid.clone(), unread);
+                        if still_exists {
+                            m.insert(sid.clone(), unread);
+                        } else {
+                            m.remove(&sid);
+                        }
                         let f = st.flags.lock().unwrap();
                         let total: i64 = m
                             .iter()
@@ -1136,7 +1175,7 @@ fn set_app_settings(
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(&p, v.to_string());
+        let _ = write_atomic(&p, &v.to_string());
     }
     *state.settings.lock().unwrap() = v.clone();
     Ok(v)
@@ -1329,7 +1368,8 @@ fn main() {
                     .unwrap()
                     .get("sidebarWidth")
                     .and_then(Value::as_f64)
-                    .unwrap_or(SIDEBAR_W);
+                    .unwrap_or(SIDEBAR_W)
+                    .clamp(160.0, 420.0); // évite qu'un réglage corrompu masque le service
                 *st.sidebar_w.lock().unwrap() = w;
             }
 

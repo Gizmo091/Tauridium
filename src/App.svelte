@@ -107,6 +107,7 @@
   // Hibernation : services mis en veille (webview fermée, session conservée).
   let hibernated = $state<Set<string>>(new Set());
   const hibTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let preloadCancelled = false; // annule la chaîne de préchargement (logout/changement de session)
 
   // Add service: full catalog loaded once, filtered live.
   let recipeQuery = $state("");
@@ -224,6 +225,7 @@
   // l'hibernation (ils seraient déchargés) et on respecte le réglage.
   function preloadRest(firstId: string | undefined) {
     if (!appSettings.preloadServices) return;
+    preloadCancelled = false;
     const list = sorted.filter(
       (s) =>
         s.isEnabled &&
@@ -232,6 +234,7 @@
     );
     let i = 0;
     const step = () => {
+      if (preloadCancelled) return; // logout/changement de session -> on arrête
       const s = list[i++];
       if (!s) return;
       preloadService(s)
@@ -349,6 +352,7 @@
 
   function selectService(s: Service) {
     const prev = activeId;
+    error = null;
     view = "service";
     activeId = s.id;
     clearHibTimer(s.id);
@@ -364,6 +368,7 @@
   }
 
   function openServiceSettings(s: Service) {
+    error = null;
     settingsSvc = { ...s }; // copie éditable ; appliquée au serveur au Save
     svcDirty = false;
     svcReload = false;
@@ -442,6 +447,7 @@
     if (!(await confirmAsk(`Delete service "${s.name}"?`))) return;
     try {
       await deleteService(s.id);
+      clearHibTimer(s.id); // évite qu'un timer d'hibernation ré-ajoute un service supprimé
       services = services.filter((x) => x.id !== s.id);
       backToService();
     } catch (err) {
@@ -450,6 +456,7 @@
   }
 
   function openWorkspaces() {
+    error = null;
     view = "workspaces";
     newWorkspaceName = "";
     hideServices();
@@ -511,6 +518,7 @@
   }
 
   async function openAdd() {
+    error = null;
     view = "add";
     recipeQuery = "";
     newServiceName = "";
@@ -532,14 +540,23 @@
 
   async function pickRecipe(r: RecipePreview) {
     try {
-      await createService(newServiceName.trim() || r.name, r.id);
+      // On récupère l'id du service créé pour ouvrir LE bon (pas un ancien du même recipe).
+      const res = (await createService(newServiceName.trim() || r.name, r.id)) as {
+        id?: string;
+        data?: { id?: string };
+        service?: { id?: string };
+      };
+      const newId = res?.id ?? res?.data?.id ?? res?.service?.id;
       [services, workspaces] = await Promise.all([
         getServices(),
         getWorkspaces(),
       ]);
       await Promise.all(services.map((s) => setServiceFlags(s).catch(() => {})));
       const created =
-        sorted.find((s) => s.recipeId === r.id) ?? sorted.at(-1) ?? null;
+        (newId && services.find((s) => s.id === newId)) ??
+        sorted.find((s) => s.recipeId === r.id) ??
+        sorted.at(-1) ??
+        null;
       if (created) selectService(created);
       else view = "service";
     } catch (err) {
@@ -548,6 +565,7 @@
   }
 
   function openAppSettings() {
+    error = null;
     view = "appSettings";
     hideServices();
   }
@@ -594,12 +612,19 @@
   }
 
   function backToService() {
+    error = null;
     const target = activeService ?? sorted.find((s) => s.isEnabled) ?? sorted[0];
     if (target) selectService(target);
     else view = "service";
   }
 
   async function handleLogout() {
+    // Nettoyage : sinon des timers d'hibernation / le préchargement / la reconnexion de
+    // l'ancienne session continuent de tourner et recréent des webviews après coup.
+    preloadCancelled = true;
+    for (const id of [...hibTimers.keys()]) clearHibTimer(id);
+    hibernated = new Set();
+    stopReconnect();
     await closeServices();
     await logout();
     me = null;

@@ -57,3 +57,23 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Le job `rust` ci-dessus tourne sur Ubuntu : il NE compile PAS les blocs
+  # #[cfg(target_os = "macos" | "windows")] (data_store_identifier, tray…). Une
+  # régression de compilation propre à ces plateformes ne se verrait qu'au tag de
+  # release. Ce job `cargo check` matriciel l'attrape dès le push.
+  rust-cross:
+    name: Rust check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
