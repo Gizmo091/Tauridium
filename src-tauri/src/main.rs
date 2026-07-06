@@ -17,7 +17,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::webview::WebviewBuilder;
+use tauri::webview::{PageLoadEvent, WebviewBuilder};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 use tauri::{
@@ -108,6 +108,8 @@ struct AppState {
     flags: Mutex<HashMap<String, ServiceFlags>>, // réglages par service (notif/mute/badge)
     settings: Mutex<Value>,          // cache des réglages app (lu par le poller, etc.)
     sidebar_w: Mutex<f64>,           // largeur de la sidebar (init en setup, def. 240)
+    desired_active: Mutex<Option<String>>, // dernier service demandé (anti vol de focus au switch)
+    inflight: Mutex<HashSet<String>>, // webviews en cours de création (anti double add_child)
 }
 
 #[derive(Clone, Copy)]
@@ -634,6 +636,18 @@ async fn create_service_webview(
     let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
         .user_agent(&ua)
         .initialization_script(IPC_SHIM_JS);
+    // Émet l'état de chargement vers le shell (spinner « loading » -> « ready »).
+    let sid_evt = service_id.to_string();
+    builder = builder.on_page_load(move |wv, payload| {
+        let status = match payload.event() {
+            PageLoadEvent::Started => "loading",
+            PageLoadEvent::Finished => "ready",
+        };
+        let _ = wv.app_handle().emit(
+            "svc-status",
+            serde_json::json!({ "id": sid_evt, "status": status }),
+        );
+    });
     // Isolation du stockage par service : macOS -> data_store_identifier (data_directory
     // ignoré) ; Windows/Linux -> data_directory dédié (sinon sessions partagées).
     #[cfg(target_os = "macos")]
@@ -677,6 +691,10 @@ async fn show_service(
     let sw = *state.sidebar_w.lock().unwrap();
     let (pos, size) = service_rect(&win, sw)?;
 
+    // Mémorise le service demandé AVANT tout await : sert de garde anti « vol de focus »
+    // si une bascule plus récente arrive pendant le chargement de celui-ci.
+    *state.desired_active.lock().unwrap() = Some(service_id.clone());
+
     let exists = state.created.lock().unwrap().contains(&service_id);
     if exists {
         // Déjà chargé (ou préchargé) : simple repositionnement, aucun fetch réseau.
@@ -685,20 +703,41 @@ async fn show_service(
             let _ = wv.set_size(size);
         }
     } else {
-        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        create_service_webview(
-            &state,
-            &win,
-            &app_data,
-            &service_id,
-            &recipe_id,
-            custom_url.as_deref(),
-            team.as_deref(),
-            user_agent_pref.as_deref(),
-            pos,
-            size,
-        )
-        .await?;
+        // Réserve la création : deux bascules rapides vers le même service neuf feraient
+        // deux add_child avec le même label (erreur). Si déjà en cours, on n'en relance pas.
+        let claim = {
+            let mut infl = state.inflight.lock().unwrap();
+            if infl.contains(&service_id) {
+                false
+            } else {
+                infl.insert(service_id.clone());
+                true
+            }
+        };
+        if claim {
+            let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            let res = create_service_webview(
+                &state,
+                &win,
+                &app_data,
+                &service_id,
+                &recipe_id,
+                custom_url.as_deref(),
+                team.as_deref(),
+                user_agent_pref.as_deref(),
+                pos,
+                size,
+            )
+            .await;
+            state.inflight.lock().unwrap().remove(&service_id);
+            res?;
+        }
+    }
+
+    // Une bascule plus récente a pu superseder celle-ci pendant le chargement : dans ce cas
+    // on n'affiche PAS ce service (sinon il volerait le focus au service désormais demandé).
+    if state.desired_active.lock().unwrap().as_deref() != Some(service_id.as_str()) {
+        return Ok(());
     }
 
     // Affiche le service demandé, masque les autres.
@@ -731,15 +770,40 @@ async fn preload_service(
     if state.created.lock().unwrap().contains(&service_id) {
         return Ok(());
     }
-    let win = app
-        .get_window("main")
-        .ok_or("Fenêtre principale introuvable")?;
+    // Réserve la création (voir show_service) : évite préchargement + bascule qui créent
+    // deux fois la même webview. Si déjà en cours, on laisse l'autre finir.
+    {
+        let mut infl = state.inflight.lock().unwrap();
+        if infl.contains(&service_id) {
+            return Ok(());
+        }
+        infl.insert(service_id.clone());
+    }
+    let win = match app.get_window("main") {
+        Some(w) => w,
+        None => {
+            state.inflight.lock().unwrap().remove(&service_id);
+            return Err("Fenêtre principale introuvable".into());
+        }
+    };
     let sw = *state.sidebar_w.lock().unwrap();
-    let (_, size) = service_rect(&win, sw)?;
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let (_, size) = match service_rect(&win, sw) {
+        Ok(r) => r,
+        Err(e) => {
+            state.inflight.lock().unwrap().remove(&service_id);
+            return Err(e);
+        }
+    };
+    let app_data = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            state.inflight.lock().unwrap().remove(&service_id);
+            return Err(e.to_string());
+        }
+    };
     // Hors-écran : la webview charge la page sans jamais recouvrir le service actif.
     let offscreen = LogicalPosition::new(-30000.0, 0.0);
-    create_service_webview(
+    let res = create_service_webview(
         &state,
         &win,
         &app_data,
@@ -751,7 +815,9 @@ async fn preload_service(
         offscreen,
         size,
     )
-    .await?;
+    .await;
+    state.inflight.lock().unwrap().remove(&service_id);
+    res?;
     if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
         let _ = wv.hide();
     }

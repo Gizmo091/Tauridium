@@ -65,6 +65,10 @@
   let activeId = $state<string | null>(null);
   let unreadMap = $state<Record<string, number>>({});
   let failedIcons = $state<Set<string>>(new Set());
+  // État de chargement par service (émis par le backend via on_page_load).
+  let statusMap = $state<Record<string, "loading" | "ready">>({});
+  // Erreur d'ouverture du service actif (showService a rejeté : recette KO, URL invalide…).
+  let serviceLoadError = $state<string | null>(null);
   let activeWorkspace = $state<string | null>(null);
 
   type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
@@ -162,6 +166,13 @@
     });
     listen<Record<string, number>>("unread", (e) => {
       unreadMap = e.payload;
+    });
+    listen<{ id: string; status: "loading" | "ready" }>("svc-status", (e) => {
+      statusMap = { ...statusMap, [e.payload.id]: e.payload.status };
+      // Le service demandé a chargé -> on efface une éventuelle erreur d'ouverture.
+      if (e.payload.status === "ready" && e.payload.id === activeId) {
+        serviceLoadError = null;
+      }
     });
     try {
       appSettings = await getAppSettings();
@@ -344,6 +355,9 @@
         closeService(sid)
           .then(() => {
             hibernated = new Set(hibernated).add(sid);
+            // Webview détruite -> son statut n'est plus valable (spinner au réveil).
+            const { [sid]: _, ...rest } = statusMap;
+            statusMap = rest;
           })
           .catch(() => {});
       }, secs * 1000),
@@ -353,6 +367,7 @@
   function selectService(s: Service) {
     const prev = activeId;
     error = null;
+    serviceLoadError = null;
     view = "service";
     activeId = s.id;
     clearHibTimer(s.id);
@@ -363,8 +378,17 @@
     }
     if (prev && prev !== s.id) scheduleHibernation(prev);
     showService(s).catch((err) => {
-      error = `Service "${s.name}": ${err}`;
+      // N'affiche l'erreur que si ce service est toujours celui à l'écran.
+      if (activeId === s.id) serviceLoadError = `${err}`;
     });
+  }
+
+  function retryActiveService() {
+    const s = activeService;
+    if (s) {
+      statusMap = { ...statusMap, [s.id]: "loading" };
+      selectService(s);
+    }
   }
 
   function openServiceSettings(s: Service) {
@@ -410,7 +434,11 @@
         userAgentPref: s.userAgentPref ?? "",
       });
       await setServiceFlags(s);
-      if (reload) await closeService(s.id); // recreated on next open with new params
+      if (reload) {
+        await closeService(s.id); // recreated on next open with new params
+        const { [s.id]: _, ...rest } = statusMap;
+        statusMap = rest;
+      }
     } catch (err) {
       error = String(err);
     }
@@ -448,6 +476,8 @@
     try {
       await deleteService(s.id);
       clearHibTimer(s.id); // évite qu'un timer d'hibernation ré-ajoute un service supprimé
+      const { [s.id]: _, ...rest } = statusMap;
+      statusMap = rest;
       services = services.filter((x) => x.id !== s.id);
       backToService();
     } catch (err) {
@@ -726,10 +756,21 @@
     <section class="stage">
       {#if view === "service"}
         {#if activeService}
-          <div class="placeholder">
-            <h2>{activeService.name}</h2>
-            <p>Loading webview…</p>
-          </div>
+          {#if serviceLoadError}
+            <div class="placeholder">
+              <h2>{activeService.name}</h2>
+              <p class="load-err">Couldn't load this service.</p>
+              <p class="load-err-detail">{serviceLoadError}</p>
+              <button class="primary" onclick={retryActiveService}>Reload</button>
+            </div>
+          {:else if statusMap[activeService.id] !== "ready"}
+            <div class="placeholder">
+              <div class="spinner" aria-hidden="true"></div>
+              <p>Loading {activeService.name}…</p>
+            </div>
+          {:else}
+            <div class="placeholder"><h2>{activeService.name}</h2></div>
+          {/if}
         {:else}
           <div class="placeholder"><p>No service selected.</p></div>
         {/if}
@@ -1233,7 +1274,15 @@
   .ver { font-weight: 700; color: var(--muted); }
 
   .stage { display: grid; place-items: center; overflow: auto; }
-  .placeholder { text-align: center; color: var(--muted); }
+  .placeholder { text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .placeholder .spinner {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .placeholder .load-err { color: var(--danger, #d9534f); font-weight: 600; margin: 0; }
+  .placeholder .load-err-detail { font-size: 12px; max-width: 420px; word-break: break-word; margin: 0; opacity: 0.8; }
   .panel {
     width: min(560px, 90%); align-self: start; margin: 40px auto;
     background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px;
