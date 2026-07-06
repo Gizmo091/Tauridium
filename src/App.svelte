@@ -70,6 +70,9 @@
   let statusMap = $state<Record<string, "loading" | "ready">>({});
   // Erreur d'ouverture du service actif (showService a rejeté : recette KO, URL invalide…).
   let serviceLoadError = $state<string | null>(null);
+  // Réordonnancement des services par glisser-déposer.
+  let dragId = $state<string | null>(null);
+  let dragOverId = $state<string | null>(null);
   let activeWorkspace = $state<string | null>(null);
 
   type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
@@ -174,6 +177,11 @@
       if (e.payload.status === "ready" && e.payload.id === activeId) {
         serviceLoadError = null;
       }
+    });
+    // ⌘1..9 (menu natif) -> bascule sur le Nᵉ service visible.
+    listen<number>("select-index", (e) => {
+      const s = visibleServices[e.payload - 1];
+      if (s) selectService(s);
     });
     try {
       appSettings = await getAppSettings();
@@ -390,6 +398,51 @@
       statusMap = { ...statusMap, [s.id]: "loading" };
       selectService(s);
     }
+  }
+
+  // --- Réordonnancement des services (glisser-déposer) ------------------------
+  function onDragStart(e: DragEvent, s: Service) {
+    dragId = s.id;
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+  function onDragOver(e: DragEvent, s: Service) {
+    if (!dragId || dragId === s.id) return;
+    e.preventDefault(); // autorise le drop
+    dragOverId = s.id;
+  }
+  function onDragLeave(s: Service) {
+    if (dragOverId === s.id) dragOverId = null;
+  }
+  function onDragEnd() {
+    dragId = null;
+    dragOverId = null;
+  }
+  async function onDrop(e: DragEvent, target: Service) {
+    e.preventDefault();
+    const from = dragId;
+    dragId = null;
+    dragOverId = null;
+    if (!from || from === target.id) return;
+    const list = [...sorted];
+    const fromIdx = list.findIndex((s) => s.id === from);
+    const toIdx = list.findIndex((s) => s.id === target.id);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = list.splice(fromIdx, 1);
+    list.splice(toIdx, 0, moved);
+    const orderById = new Map(list.map((s, i) => [s.id, i]));
+    // Persiste chaque service dont l'ordre a changé (best effort).
+    const updates: Promise<unknown>[] = [];
+    for (const s of services) {
+      const ord = orderById.get(s.id);
+      if (ord !== undefined && s.order !== ord) {
+        updates.push(updateService(s.id, { order: ord }).catch(() => {}));
+      }
+    }
+    services = services.map((s) => ({
+      ...s,
+      order: orderById.get(s.id) ?? s.order,
+    }));
+    await Promise.all(updates);
   }
 
   function openServiceSettings(s: Service) {
@@ -1154,7 +1207,18 @@
 {/if}
 
 {#snippet row(s: Service)}
-  <div class="srow-wrap">
+  <div
+    class="srow-wrap"
+    class:drag-over={dragOverId === s.id}
+    class:dragging={dragId === s.id}
+    draggable="true"
+    role="listitem"
+    ondragstart={(e) => onDragStart(e, s)}
+    ondragover={(e) => onDragOver(e, s)}
+    ondragleave={() => onDragLeave(s)}
+    ondrop={(e) => onDrop(e, s)}
+    ondragend={onDragEnd}
+  >
     <button
       class="srow"
       class:active={s.id === activeId && view === "service"}
@@ -1273,7 +1337,12 @@
   .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 9px; }
   .svclist { display: flex; flex-direction: column; gap: 2px; }
 
-  .srow-wrap { display: flex; align-items: center; }
+  .srow-wrap { display: flex; align-items: center; position: relative; }
+  .srow-wrap.dragging { opacity: 0.4; }
+  .srow-wrap.drag-over::before {
+    content: ""; position: absolute; left: 6px; right: 6px; top: -1px;
+    height: 2px; background: var(--accent); border-radius: 2px;
+  }
   .srow {
     display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0;
     padding: 7px 8px; border: none; border-radius: 8px; background: none;

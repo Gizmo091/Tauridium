@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
 #[cfg(target_os = "macos")]
@@ -1598,13 +1598,41 @@ fn main() {
                         &devtools,
                     ],
                 )?;
-                let menu = Menu::with_items(app, &[&app_sub, &edit, &view])?;
+                // Sous-menu Services : ⌘1..9 pour basculer (accélérateurs natifs -> fonctionnent
+                // même quand une webview de service a le focus, contrairement à un keydown JS).
+                let mut goto_items: Vec<MenuItem<Wry>> = Vec::new();
+                for i in 1..=9u32 {
+                    goto_items.push(MenuItem::with_id(
+                        app,
+                        format!("goto-svc-{i}"),
+                        format!("Service {i}"),
+                        true,
+                        Some(format!("CmdOrCtrl+{i}")),
+                    )?);
+                }
+                let goto_refs: Vec<&dyn IsMenuItem<Wry>> = goto_items
+                    .iter()
+                    .map(|m| m as &dyn IsMenuItem<Wry>)
+                    .collect();
+                let services_menu = Submenu::with_items(app, "Services", true, &goto_refs)?;
+                let menu = Menu::with_items(app, &[&app_sub, &edit, &view, &services_menu])?;
                 app.set_menu(menu)?;
-                app.on_menu_event(|app, event| match event.id.as_ref() {
-                    "toggle-devtools" => toggle_devtools(app),
-                    "reload-service" => reload_active_service(app),
-                    "reload-app" => reload_app(app),
-                    _ => {}
+                app.on_menu_event(|app, event| {
+                    let id = event.id.as_ref();
+                    match id {
+                        "toggle-devtools" => toggle_devtools(app),
+                        "reload-service" => reload_active_service(app),
+                        "reload-app" => reload_app(app),
+                        _ => {
+                            // goto-svc-N -> demande au shell d'afficher le Nᵉ service visible.
+                            if let Some(n) = id
+                                .strip_prefix("goto-svc-")
+                                .and_then(|s| s.parse::<usize>().ok())
+                            {
+                                let _ = app.emit("select-index", n);
+                            }
+                        }
+                    }
                 });
             }
 
