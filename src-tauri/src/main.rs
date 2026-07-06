@@ -230,15 +230,40 @@ async fn restore_session(app: AppHandle, state: State<'_, AppState>) -> Result<V
         .ok_or("Session invalide")?
         .to_string();
 
-    match api_get(&server, &token, "/v1/me").await {
-        Ok(me) => {
+    // On valide le token, mais on ne supprime la session QUE si le serveur la refuse
+    // vraiment (401/403). Une erreur réseau ou serveur transitoire (5xx, blip au reload)
+    // NE DOIT PAS déconnecter — sinon un simple reload peut effacer une session valide.
+    let res = reqwest::Client::new()
+        .get(format!("{server}/v1/me"))
+        .bearer_auth(&token)
+        .header(reqwest::header::USER_AGENT, API_UA)
+        .send()
+        .await;
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let me: Value = r
+                .json()
+                .await
+                .map_err(|e| format!("Réponse /v1/me illisible : {e}"))?;
             *state.server.lock().unwrap() = Some(server);
             *state.token.lock().unwrap() = Some(token);
             Ok(me)
         }
-        Err(e) => {
+        Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+            // Token réellement invalide/expiré -> on nettoie la session.
             let _ = std::fs::remove_file(&path);
-            Err(format!("Session expirée : {e}"))
+            Err("expired: session refusée par le serveur".into())
+        }
+        Ok(r) => {
+            // Erreur serveur transitoire -> on GARDE la session (retry côté UI).
+            Err(format!(
+                "transient: serveur injoignable (HTTP {})",
+                r.status()
+            ))
+        }
+        Err(e) => {
+            // Erreur réseau -> on GARDE la session.
+            Err(format!("transient: réseau indisponible ({e})"))
         }
     }
 }

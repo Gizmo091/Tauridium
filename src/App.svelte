@@ -165,14 +165,20 @@
     } catch {
       /* defaults */
     }
-    try {
-      me = await restoreSession();
-      await loadAfterAuth();
-    } catch {
-      // no valid session -> login screen
-    } finally {
-      booting = false;
+    // Restaure la session, en retentant sur erreur transitoire (réseau/serveur) : un
+    // simple reload avec un blip réseau ne doit pas renvoyer à l'écran de login.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        me = await restoreSession();
+        await loadAfterAuth();
+        break;
+      } catch (e) {
+        const transient = String(e).startsWith("transient:");
+        if (!transient || attempt === 2) break; // vraie déco, ou retries épuisés
+        await new Promise((r) => setTimeout(r, 800));
+      }
     }
+    booting = false;
     appVersion()
       .then((v) => (appVer = v))
       .catch(() => {});
