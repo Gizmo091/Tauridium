@@ -49,6 +49,16 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
 
+  // Reconnexion auto quand le serveur est injoignable (panne Ferdium, réseau…).
+  const RECONNECT_SECS = 30;
+  let reconnecting = $state(false);
+  let reconnectIn = $state(RECONNECT_SECS);
+  let pendingCreds = $state<{ server: string; email: string; password: string } | null>(
+    null,
+  );
+  let reconnectAttempt: (() => Promise<boolean>) | null = null;
+  let reconnectTimer: ReturnType<typeof setInterval> | null = null;
+
   let me = $state<MeUser | null>(null);
   let services = $state<Service[]>([]);
   let workspaces = $state<Workspace[]>([]);
@@ -165,20 +175,11 @@
     } catch {
       /* defaults */
     }
-    // Restaure la session, en retentant sur erreur transitoire (réseau/serveur) : un
-    // simple reload avec un blip réseau ne doit pas renvoyer à l'écran de login.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        me = await restoreSession();
-        await loadAfterAuth();
-        break;
-      } catch (e) {
-        const transient = String(e).startsWith("transient:");
-        if (!transient || attempt === 2) break; // vraie déco, ou retries épuisés
-        await new Promise((r) => setTimeout(r, 800));
-      }
-    }
+    // Restaure la session. Si le serveur est injoignable (panne Ferdium, réseau…), on
+    // n'affiche PAS le login : un écran « reconnexion » retente tout seul toutes les 30s.
+    const restored = await attemptRestore();
     booting = false;
+    if (!restored) startReconnect(attemptRestore);
     appVersion()
       .then((v) => (appVer = v))
       .catch(() => {});
@@ -240,19 +241,82 @@
     setTimeout(step, 1500); // laisse le service actif se charger d'abord
   }
 
+  function stopReconnect() {
+    if (reconnectTimer) {
+      clearInterval(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectAttempt = null;
+    reconnecting = false;
+  }
+
+  // Lance une boucle de reconnexion : rappelle `attempt` toutes les RECONNECT_SECS.
+  // `attempt` renvoie true quand c'est terminé (succès OU erreur définitive) -> stop ;
+  // false -> serveur toujours injoignable -> on retentera.
+  function startReconnect(attempt: () => Promise<boolean>) {
+    stopReconnect();
+    reconnectAttempt = attempt;
+    reconnecting = true;
+    reconnectIn = RECONNECT_SECS;
+    reconnectTimer = setInterval(async () => {
+      reconnectIn -= 1;
+      if (reconnectIn <= 0) {
+        reconnectIn = RECONNECT_SECS;
+        if (await attempt()) stopReconnect();
+      }
+    }, 1000);
+  }
+
+  async function retryNow() {
+    const fn = reconnectAttempt;
+    if (!fn) return;
+    reconnectIn = RECONNECT_SECS;
+    if (await fn()) stopReconnect();
+  }
+
+  function cancelReconnect() {
+    pendingCreds = null;
+    stopReconnect();
+  }
+
+  // Tente de restaurer la session. true = terminé (connecté OU session expirée ->
+  // écran login) ; false = serveur injoignable (on retentera).
+  async function attemptRestore(): Promise<boolean> {
+    try {
+      me = await restoreSession();
+      await loadAfterAuth();
+      return true;
+    } catch (e) {
+      return !String(e).startsWith("transient:");
+    }
+  }
+
+  // Tente le login avec les identifiants en attente. false = serveur injoignable.
+  async function attemptLogin(): Promise<boolean> {
+    if (!pendingCreds) return true;
+    try {
+      me = await login(pendingCreds.server, pendingCreds.email, pendingCreds.password);
+      pendingCreds = null;
+      password = "";
+      error = null;
+      await loadAfterAuth();
+      return true;
+    } catch (e) {
+      if (String(e).startsWith("transient:")) return false;
+      error = String(e); // identifiants refusés -> on arrête et on affiche l'erreur
+      pendingCreds = null;
+      return true;
+    }
+  }
+
   async function handleLogin(e: Event) {
     e.preventDefault();
     loading = true;
     error = null;
-    try {
-      me = await login(server, email, password);
-      password = "";
-      await loadAfterAuth();
-    } catch (err) {
-      error = String(err);
-    } finally {
-      loading = false;
-    }
+    pendingCreds = { server, email, password };
+    const done = await attemptLogin();
+    loading = false;
+    if (!done) startReconnect(attemptLogin); // serveur injoignable -> reconnexion auto
   }
 
   function clearHibTimer(sid: string) {
@@ -550,6 +614,18 @@
 {#if booting}
   <main class="login">
     <div class="card"><p class="sub">Restoring session…</p></div>
+  </main>
+{:else if reconnecting}
+  <main class="login">
+    <div class="card">
+      <h1>Tauridium</h1>
+      <p class="notice">⚠️ Can't reach the server — it may be temporarily down.</p>
+      <p class="sub">Retrying automatically in {reconnectIn}s…</p>
+      <button class="primary" onclick={retryNow}>Retry now</button>
+      <button class="link" onclick={cancelReconnect}>
+        {pendingCreds ? "Cancel" : "Sign in with a different account"}
+      </button>
+    </div>
   </main>
 {:else if !me}
   <main class="login">
@@ -1079,7 +1155,6 @@
   :global(body[data-svcloc="center"]) .svcarea { justify-content: center; }
   :global(body[data-svcloc="bottom"]) .svcarea { justify-content: flex-end; }
   .account { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
-  .acts { display: inline-flex; gap: 8px; align-items: center; }
   .link { background: none; border: none; color: var(--link); cursor: pointer; font-size: 12px; text-decoration: underline; }
   .add {
     background: var(--hover); border: 1px dashed var(--border2); color: var(--accent-soft);

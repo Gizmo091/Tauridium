@@ -186,12 +186,18 @@ async fn login(
         .header(reqwest::header::USER_AGENT, API_UA)
         .send()
         .await
-        .map_err(|e| format!("Connexion au serveur impossible : {e}"))?;
+        // Erreur réseau -> transitoire (préfixe reconnu par l'UI pour retenter).
+        .map_err(|e| format!("transient: serveur injoignable ({e})"))?;
 
-    if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("Identifiants refusés (HTTP {status}). {body}"));
+    let status = res.status();
+    if !status.is_success() {
+        // 401/403 = vrais identifiants refusés (on n'insiste pas) ; le reste (5xx, serveur
+        // qui répond mal…) = transitoire, l'UI retentera.
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            let body = res.text().await.unwrap_or_default();
+            return Err(format!("Identifiants refusés. {body}"));
+        }
+        return Err(format!("transient: serveur en erreur (HTTP {status})"));
     }
 
     let body: Value = res
