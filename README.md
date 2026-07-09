@@ -82,9 +82,22 @@ Pushing a `v*` tag triggers GitHub Actions, which runs the tests, builds for
 ARM64), then — once every build passes — publishes a GitHub Release with the
 bundles attached.
 
+Release notes come from [`CHANGELOG.md`](CHANGELOG.md): the workflow extracts the
+section matching the tagged version and uses it as the GitHub Release body. So,
+before tagging:
+
+1. Move the relevant `## [Unreleased]` entries into a new `## [X.Y.Z] - DATE`
+   section (**write them in English** — this is the project convention).
+2. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and
+   `src-tauri/Cargo.lock`, then commit.
+3. Tag and push:
+
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+If no matching `CHANGELOG.md` section exists, the workflow falls back to generic
+notes (and logs a warning).
 
 Continuous integration (`cargo fmt` · clippy · Rust tests · svelte-check ·
 vitest · frontend build) runs on every push and pull request.

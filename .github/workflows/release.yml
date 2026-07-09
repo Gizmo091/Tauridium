@@ -55,23 +55,52 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const tag = process.env.GITHUB_REF_NAME;
+            const fs = require('fs');
+            const tag = process.env.GITHUB_REF_NAME;      // ex. v0.1.9
+            const version = tag.replace(/^v/, '');
+
+            // Note macOS evergreen (identique à chaque release, hors CHANGELOG).
+            const macos = [
+              `> ⚠️ **macOS**: builds are **unsigned** (no paid Apple Developer account),`,
+              `> so Gatekeeper blocks them on first launch. To open Tauridium:`,
+              `> - **macOS ≤ 14**: right-click the app → **Open** → confirm, or`,
+              `> - **macOS 15+**: try to open it, then System Settings → Privacy &`,
+              `>   Security → **Open Anyway**, or`,
+              `> - run in Terminal: \`xattr -cr /Applications/Tauridium.app\``,
+            ].join('\n');
+
+            // Extrait la section "## [version] ..." du CHANGELOG (jusqu'au prochain
+            // titre "## "). Découpage par lignes = pas d'échappement regex fragile.
+            let section = '';
+            try {
+              const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/);
+              const start = lines.findIndex((l) => l.startsWith(`## [${version}]`));
+              if (start !== -1) {
+                let end = lines.length;
+                for (let i = start + 1; i < lines.length; i++) {
+                  if (lines[i].startsWith('## ')) { end = i; break; }
+                }
+                section = lines.slice(start + 1, end).join('\n').trim();
+              }
+            } catch (e) {
+              core.warning(`CHANGELOG.md illisible : ${e.message}`);
+            }
+
+            if (!section) {
+              core.warning(`Aucune section CHANGELOG pour ${version} — notes génériques.`);
+            }
+
+            const body = (section
+              ? [section, ``, `---`, ``, macos]
+              : [`Automated build of Tauridium ${tag}.`, ``, macos]
+            ).concat([``, `Download the asset matching your platform below.`]).join('\n');
+
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
               name: `Tauridium ${tag}`,
-              body: [
-                `Automated build of Tauridium ${tag}.`,
-                `Download the asset matching your platform below.`,
-                ``,
-                `> ⚠️ **macOS**: builds are **unsigned** (no paid Apple Developer account),`,
-                `> so Gatekeeper blocks them on first launch. To open Tauridium:`,
-                `> - **macOS ≤ 14**: right-click the app → **Open** → confirm, or`,
-                `> - **macOS 15+**: try to open it, then System Settings → Privacy &`,
-                `>   Security → **Open Anyway**, or`,
-                `> - run in Terminal: \`xattr -cr /Applications/Tauridium.app\``,
-              ].join('\n'),
+              body,
               draft: true,
               prerelease: false,
             });
