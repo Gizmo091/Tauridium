@@ -4,6 +4,20 @@
 
 <h1 align="center">Tauridium</h1>
 
+<p align="center">
+  <a href="https://github.com/Gizmo091/Tauridium/releases/latest"><img src="https://img.shields.io/github/v/release/Gizmo091/Tauridium?sort=semver" alt="Latest release" /></a>
+  <a href="https://github.com/Gizmo091/Tauridium/releases"><img src="https://img.shields.io/github/downloads/Gizmo091/Tauridium/total" alt="Total downloads" /></a>
+  <img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained: yes" />
+  <img src="https://img.shields.io/badge/maintainer-Mathieu%20Vedie-blue" alt="Maintainer: Mathieu Vedie" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/contributions-welcome-brightgreen.svg" alt="Contributions welcome" />
+  <a href="https://github.com/Gizmo091/Tauridium/commits"><img src="https://badgen.net/github/last-commit/Gizmo091/Tauridium" alt="Latest commit" /></a>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/mathieuvedie"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" height="32" /></a>
+</p>
+
 A lightweight desktop client for [Ferdium](https://ferdium.org), built with
 **Tauri v2** (Rust + native WebView) instead of Electron — while staying fully
 connected to your Ferdium **server** (same account, synced services & workspaces).

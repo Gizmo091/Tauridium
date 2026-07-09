@@ -4,6 +4,7 @@
   "description": "Tauridium — lightweight Tauri client for Ferdium",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

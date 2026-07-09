@@ -3,6 +3,7 @@ name = "tauridium"
 version = "0.1.9"
 edition = "2021"
 description = "Tauridium — lightweight Tauri client for Ferdium"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
