@@ -17,7 +17,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::webview::{PageLoadEvent, WebviewBuilder};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, WebviewBuilder};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 use tauri::{
@@ -643,6 +643,19 @@ const IPC_SHIM_JS: &str = r#"(function(){
   }
 })();"#;
 
+// Ouvre une URL dans le navigateur par défaut du système (hors app). Best effort : on
+// ignore l'échec (pas de navigateur, spawn refusé…). L'appelant filtre déjà le schéma.
+fn open_external(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
 #[tauri::command]
 // Crée (si absente) la webview d'un service à la position/taille données. Les fetchs de
 // recette (config + webview.js) ne sont faits QU'ICI (création) — plus à chaque bascule.
@@ -698,7 +711,23 @@ async fn create_service_webview(
     // Shim IPC injecté pour TOUS les services (Synology Chat… en dépendent).
     let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
         .user_agent(&ua)
-        .initialization_script(IPC_SHIM_JS);
+        .initialization_script(IPC_SHIM_JS)
+        // Liens `target="_blank"` / `window.open` : sans handler, WKWebView les ignore
+        // silencieusement (le clic ne fait « rien »). On reproduit le comportement Ferdium :
+        //  - popup dimensionné (window.open avec width/height, typiquement un login OAuth)
+        //    -> vraie fenêtre in-app (session/cookies partagés) pour ne pas casser le flow ;
+        //  - lien de contenu (sans dimensions) -> navigateur système, webview inchangée.
+        .on_new_window(
+            |url: Url, features: NewWindowFeatures| -> NewWindowResponse<Wry> {
+                if features.size().is_some() {
+                    return NewWindowResponse::Allow;
+                }
+                if matches!(url.scheme(), "http" | "https" | "mailto") {
+                    open_external(url.as_str());
+                }
+                NewWindowResponse::Deny
+            },
+        );
     // Émet l'état de chargement vers le shell (spinner « loading » -> « ready »).
     let sid_evt = service_id.to_string();
     builder = builder.on_page_load(move |wv, payload| {
