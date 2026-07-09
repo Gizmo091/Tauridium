@@ -6,7 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/Gizmo091/Tauridium/releases/latest"><img src="https://img.shields.io/github/v/release/Gizmo091/Tauridium?sort=semver" alt="Latest release" /></a>
-  <a href="https://github.com/Gizmo091/Tauridium/releases"><img src="https://img.shields.io/github/downloads/Gizmo091/Tauridium/total" alt="Total downloads" /></a>
+  <a href="https://github.com/Gizmo091/Tauridium/releases"><img src="https://img.shields.io/github/downloads/Gizmo091/Tauridium/total?label=downloads%20total" alt="Total downloads (all releases)" /></a>
+  <a href="https://github.com/Gizmo091/Tauridium/releases/latest"><img src="https://img.shields.io/github/downloads/Gizmo091/Tauridium/latest/total?label=downloads%20latest" alt="Downloads (latest release)" /></a>
   <img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained: yes" />
   <img src="https://img.shields.io/badge/maintainer-Mathieu%20Vedie-blue" alt="Maintainer: Mathieu Vedie" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
