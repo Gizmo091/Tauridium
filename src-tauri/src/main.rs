@@ -17,7 +17,9 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, WebviewBuilder};
+use tauri::webview::{
+    DownloadEvent, NewWindowFeatures, NewWindowResponse, PageLoadEvent, WebviewBuilder,
+};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 use tauri::{
@@ -656,6 +658,96 @@ fn open_external(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+// Nom de fichier pour un téléchargement, dérivé de l'URL (dernier segment de chemin, la
+// query est ignorée). Nettoie les séparateurs pour éviter toute traversée de dossier.
+fn download_filename(url: &Url) -> String {
+    let raw = url
+        .path_segments()
+        .and_then(|mut segs| segs.next_back())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("download");
+    let clean: String = raw.replace(['/', '\\', '\0'], "_");
+    if clean.is_empty() {
+        "download".to_string()
+    } else {
+        clean
+    }
+}
+
+// Chemin de destination non existant dans `dir` (WKDownload échoue si le fichier existe) :
+// ajoute « (1) », « (2) »… avant l'extension en cas de collision.
+fn unique_download_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let p = Path::new(name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+    let ext = p.extension().and_then(|s| s.to_str());
+    for i in 1..10_000 {
+        let fname = match ext {
+            Some(e) => format!("{stem} ({i}).{e}"),
+            None => format!("{stem} ({i})"),
+        };
+        let candidate = dir.join(fname);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(name)
+}
+
+// Correctif frappes doublées (macOS/WKWebView, webviews enfants) : WebKit dispatche des
+// évènements `textInput` legacy REDONDANTS avec l'insertion réelle. Deux cas observés dans
+// Discord :
+//  a) frappe normale -> DEUX `textInput` identiques pour une frappe (recherche Draft.js) ;
+//  b) composition (touche morte / accent) -> un `textInput` legacy EN PLUS du
+//     `beforeinput[insertFromComposition]` standard (compositeur Slate).
+// Les deux -> caractère doublé.
+//
+// Subtilité : Draft.js (recherche) S'APPUIE sur le `textInput` de composition (le neutraliser
+// perdrait l'accent), alors que Slate (compositeur) le double. Besoins opposés sur le MÊME
+// évènement -> on discrimine par l'éditeur cible :
+//  - hors composition : on supprime le 2ᵉ `textInput` identique de la frappe (cas a) ;
+//  - en composition : on ne neutralise le `textInput` legacy que dans un éditeur **Slate**
+//    (`[data-slate-editor]`), jamais dans Draft.js (cas b).
+// Interrupteurs de diagnostic : `window.__pakeDedup=false` (tout), `__pakeDedupComp=false`
+// (partie composition seulement).
+const KEY_DEDUP_JS: &str = r#"(function(){
+  var token = 0, seenTok = -1, seenData = null, composing = false;
+  document.addEventListener('keydown', function(){ token++; }, true);
+  document.addEventListener('compositionstart', function(){ composing = true; }, true);
+  document.addEventListener('compositionend', function(){ composing = false; }, true);
+  function targetEl(e){
+    var t = e.target;
+    if (t && t.nodeType === 3) t = t.parentElement;   // node texte -> élément parent
+    return (t && t.closest) ? t : null;
+  }
+  document.addEventListener('textInput', function(e){
+    if (window.__pakeDedup === false) return;
+    if (!e.isTrusted || typeof e.data !== 'string' || e.data.length !== 1) return;
+    if (composing) {
+      if (window.__pakeDedupComp === false) return;
+      // Uniquement dans un éditeur Slate (compositeur), jamais dans Draft.js (recherche).
+      var el = targetEl(e);
+      if (el && el.closest('[data-slate-editor="true"]') && !el.closest('[class*="DraftEditor"]')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      return;
+    }
+    // Hors composition : 2ᵉ `textInput` identique pour la MÊME frappe -> doublon natif.
+    if (seenTok === token && seenData === e.data) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    } else {
+      seenTok = token;
+      seenData = e.data;
+    }
+  }, true);
+})();"#;
+
 #[tauri::command]
 // Crée (si absente) la webview d'un service à la position/taille données. Les fetchs de
 // recette (config + webview.js) ne sont faits QU'ICI (création) — plus à chaque bascule.
@@ -712,6 +804,8 @@ async fn create_service_webview(
     let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
         .user_agent(&ua)
         .initialization_script(IPC_SHIM_JS)
+        // Anti-doublement de frappe (double `textInput` natif WKWebView, cf. recherche Discord).
+        .initialization_script(KEY_DEDUP_JS)
         // Liens `target="_blank"` / `window.open` : sans handler, WKWebView les ignore
         // silencieusement (le clic ne fait « rien »). On reproduit le comportement Ferdium :
         //  - popup dimensionné (window.open avec width/height, typiquement un login OAuth)
@@ -739,6 +833,35 @@ async fn create_service_webview(
             "svc-status",
             serde_json::json!({ "id": sid_evt, "status": status }),
         );
+    });
+    // Téléchargements (clic droit « Download », liens `download`…) : WKWebView n'a pas de
+    // gestion par défaut -> rien ne se passe. On enregistre dans le dossier Téléchargements
+    // et on notifie à la fin (sur macOS le chemin final n'est pas exposé par l'API).
+    builder = builder.on_download(|webview, event| {
+        match event {
+            DownloadEvent::Requested { url, destination } => {
+                let dir = webview
+                    .app_handle()
+                    .path()
+                    .download_dir()
+                    .or_else(|_| webview.app_handle().path().home_dir())
+                    .unwrap_or_else(|_| PathBuf::from("."));
+                *destination = unique_download_path(&dir, &download_filename(&url));
+            }
+            DownloadEvent::Finished {
+                url, success: true, ..
+            } => {
+                let _ = webview
+                    .app_handle()
+                    .notification()
+                    .builder()
+                    .title("Tauridium")
+                    .body(format!("« {} » téléchargé", download_filename(&url)))
+                    .show();
+            }
+            _ => {}
+        }
+        true // autorise le téléchargement
     });
     // Isolation du stockage par service : macOS -> data_store_identifier (data_directory
     // ignoré) ; Windows/Linux -> data_directory dédié (sinon sessions partagées).
@@ -1389,24 +1512,18 @@ fn toggle_main(app: &AppHandle) {
 
 // Ouvre/ferme les devtools sur la webview du service actif (debug), puis repose le layout.
 fn toggle_devtools(app: &AppHandle) {
-    #[cfg(debug_assertions)]
-    {
-        let active = app.state::<AppState>().active.lock().unwrap().clone();
-        if let Some(sid) = active {
-            if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
-                if wv.is_devtools_open() {
-                    wv.close_devtools();
-                } else {
-                    wv.open_devtools();
-                }
+    // Disponible en release grâce à la feature `devtools` de Tauri (cf. Cargo.toml).
+    let active = app.state::<AppState>().active.lock().unwrap().clone();
+    if let Some(sid) = active {
+        if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
+            if wv.is_devtools_open() {
+                wv.close_devtools();
+            } else {
+                wv.open_devtools();
             }
         }
-        reposition_active(app);
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = app;
-    }
+    reposition_active(app);
 }
 
 // Recharge la webview du service actif (comme « Reload service » de Ferdium).

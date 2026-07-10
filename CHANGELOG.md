@@ -12,6 +12,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-07-10
+### Fixed
+- **Doubled keystrokes in Discord's channel search.** On macOS, WKWebView
+  dispatched two native `textInput` events per keystroke, so Draft.js-based
+  fields (Discord's channel search) inserted every character twice. The
+  duplicate is now de-duplicated (at most one insertion per keydown).
+- **Doubled accented characters in Discord's message composer.** Dead keys /
+  IME composition (é, ê, à…) inserted the character twice in the Slate composer.
+  The redundant legacy `textInput` is now neutralized in Slate editors only, so
+  Draft.js accent input (search) keeps working.
+### Added
+- **In-app downloads.** Downloads triggered from within a service (e.g.
+  WhatsApp's image download button, ChatGPT image downloads) now save to your
+  Downloads folder, with a completion notification.
+- **Developer Tools in release builds.** "Toggle Developer Tools" (⌘⌥I) now
+  works in the packaged app, not just in `cargo tauri dev`.
+### Known limitations
+- The native right-click **"Download Image"** context-menu item does not work:
+  WKWebView handles it through an internal path that is not exposed to the app.
+  Use a service's in-page download button instead.
+
 ## [0.1.9] - 2026-07-09
 ### Fixed
 - **Links in conversations are clickable again.** `target="_blank"` links and

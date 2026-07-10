@@ -143,6 +143,11 @@ drag Tauridium to Applications, then either:
   login screen pick "try another way" and use a **password + an authenticator
   code (TOTP) or a phone prompt** instead of a passkey. See
   [tauri-apps/tauri#7926](https://github.com/tauri-apps/tauri/issues/7926).
+- **The native right-click "Download Image" doesn't work.** WKWebView handles
+  that context-menu item through an internal path that isn't exposed to the app.
+  Downloads triggered from within a service (in-page download buttons, e.g.
+  WhatsApp or ChatGPT) do work and save to your Downloads folder. **Workaround:**
+  use the service's own download button instead of the right-click menu.
 
 ## Status & caveats
 
