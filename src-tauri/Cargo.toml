@@ -1,6 +1,6 @@
 [package]
 name = "tauridium"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Tauridium — lightweight Tauri client for Ferdium"
 license = "MIT"
@@ -9,7 +9,9 @@ license = "MIT"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["unstable", "tray-icon"] }
+# `devtools` : rend open/close/is_devtools_open disponibles AUSSI en build release
+# (sinon le menu « Toggle Developer Tools » est inerte hors dev).
+tauri = { version = "2", features = ["unstable", "tray-icon", "devtools"] }
 # Accès direct à l'API bas niveau de wry (remove_data_store macOS) pour purger le
 # WKWebsiteDataStore d'un service supprimé. Redirigé vers ../vendor/wry par le patch.
 wry = "0.55"
