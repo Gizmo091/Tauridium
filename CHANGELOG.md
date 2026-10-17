@@ -14,6 +14,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-10-17
+
 ### Added
 - **Account-free local profile.** Start from scratch without a Ferdium server;
   services and workspaces are stored on this device and use the Ferdium recipe
@@ -35,6 +37,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Show capitalized service names in local mode ("Amazon Web Services",
   "WhatsApp") in the catalog and the rail; existing local services are renamed
   automatically unless you gave them a custom name.
+
+### Fixed
+- **Linux: the AppImage could not start when mounted by another user** (firejail,
+  the AppImage catalog test): its launcher was packaged without execute
+  permission for other users. Builds now use Tauri CLI 2.12, whose linuxdeploy
+  packages it as 0755.
 
 ## [0.1.12] - 2026-09-08
 ### Fixed
