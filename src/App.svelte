@@ -12,6 +12,7 @@
   }
   import {
     login,
+    startLocal,
     restoreSession,
     getServices,
     getWorkspaces,
@@ -61,6 +62,7 @@
   let reconnectTimer: ReturnType<typeof setInterval> | null = null;
 
   let me = $state<MeUser | null>(null);
+  const isLocal = $derived(me?.mode === "local");
   let services = $state<Service[]>([]);
   let workspaces = $state<Workspace[]>([]);
   let activeId = $state<string | null>(null);
@@ -77,6 +79,9 @@
 
   type View = "service" | "svcSettings" | "add" | "appSettings" | "workspaces";
   let view = $state<View>("service");
+  let railExpanded = $state(false);
+  const COLLAPSED_RAIL_WIDTH = 76;
+  const EXPANDED_RAIL_WIDTH = 240;
   let settingsSvc = $state<Service | null>(null);
   let svcDirty = $state(false); // réglages service modifiés mais pas encore sauvés
   let svcReload = $state(false); // un champ nécessitant un reload (URL/team/UA) a changé
@@ -100,16 +105,14 @@
     closeToSystemTray: true,
     privateNotifications: false,
     showDisabledServices: true,
-    showServiceName: true,
     showMessageBadgeWhenMuted: true,
     userAgentPref: "",
-    sidebarWidth: 240,
     iconSize: 24,
     grayscaleServices: false,
     grayscaleDim: 50,
     sidebarServicesLocation: "top",
     hibernationTimer: 0,
-    preloadServices: true,
+    preloadServices: false,
   });
 
   // Hibernation : services mis en veille (webview fermée, session conservée).
@@ -196,6 +199,7 @@
     } catch {
       /* defaults */
     }
+    setSidebarWidth(COLLAPSED_RAIL_WIDTH).catch(() => {});
     // Restaure la session. Si le serveur est injoignable (panne Ferdium, réseau…), on
     // n'affiche PAS le login : un écran « reconnexion » retente tout seul toutes les 30s.
     const restored = await attemptRestore();
@@ -216,10 +220,9 @@
     document.body.style.setProperty("--accent-fg", accentFg(appSettings.accentColor));
   }
 
-  // Customisation sidebar : largeur, taille des icônes, gris + dim, position.
+  // Customisation du rail : taille des icônes, gris + dim, position.
   function applyLayout() {
     const b = document.body;
-    b.style.setProperty("--sidebar-w", `${appSettings.sidebarWidth}px`);
     b.style.setProperty("--icon-size", `${appSettings.iconSize}px`);
     b.classList.toggle("grayscale", !!appSettings.grayscaleServices);
     // dim 0..100 -> opacité des icônes en gris (100 = très estompé)
@@ -340,6 +343,23 @@
     const done = await attemptLogin();
     loading = false;
     if (!done) startReconnect(attemptLogin); // serveur injoignable -> reconnexion auto
+  }
+
+  async function handleStartLocal() {
+    loading = true;
+    error = null;
+    try {
+      const localUser = await startLocal();
+      pendingCreds = null;
+      password = "";
+      stopReconnect();
+      await loadAfterAuth();
+      me = localUser;
+    } catch (err) {
+      error = String(err);
+    } finally {
+      loading = false;
+    }
   }
 
   function clearHibTimer(sid: string) {
@@ -543,6 +563,7 @@
       const { [s.id]: _, ...rest } = statusMap;
       statusMap = rest;
       services = services.filter((x) => x.id !== s.id);
+      workspaces = await getWorkspaces();
       backToService();
     } catch (err) {
       error = String(err);
@@ -670,6 +691,13 @@
         sorted.find((s) => s.recipeId === r.id) ??
         sorted.at(-1) ??
         null;
+      if (created && activeWorkspace) {
+        const workspace = workspaces.find((w) => w.id === activeWorkspace);
+        if (workspace && !workspace.services.includes(created.id)) {
+          await updateWorkspace(workspace.id, workspace.name, [...workspace.services, created.id]);
+          await reloadWorkspaces();
+        }
+      }
       if (created) selectService(created);
       else view = "service";
     } catch (err) {
@@ -681,6 +709,22 @@
     error = null;
     view = "appSettings";
     hideServices();
+  }
+
+  async function toggleRail() {
+    const expanded = !railExpanded;
+    railExpanded = expanded;
+    try {
+      await setSidebarWidth(expanded ? EXPANDED_RAIL_WIDTH : COLLAPSED_RAIL_WIDTH);
+    } catch (err) {
+      railExpanded = !expanded;
+      error = String(err);
+    }
+  }
+
+  function chooseWorkspace(workspaceId: string | null) {
+    activeWorkspace = workspaceId;
+    backToService();
   }
 
   async function checkUpdates(silent = false) {
@@ -712,7 +756,6 @@
     (appSettings as Record<string, unknown>)[key] = value;
     if (key === "theme" || key === "accentColor") applyTheme();
     applyLayout();
-    if (key === "sidebarWidth") setSidebarWidth(value as number).catch(() => {});
     try {
       appSettings = await setAppSettings({
         [key]: value,
@@ -726,9 +769,15 @@
 
   function backToService() {
     error = null;
-    const target = activeService ?? sorted.find((s) => s.isEnabled) ?? sorted[0];
+    const target = visibleServices.find((s) => s.id === activeId)
+      ?? visibleServices.find((s) => s.isEnabled)
+      ?? visibleServices[0];
     if (target) selectService(target);
-    else view = "service";
+    else {
+      activeId = null;
+      view = "service";
+      hideServices();
+    }
   }
 
   async function handleLogout() {
@@ -759,10 +808,12 @@
       <h1>Tauridium</h1>
       <p class="notice">⚠️ Can't reach the server — it may be temporarily down.</p>
       <p class="sub">Retrying automatically in {reconnectIn}s…</p>
+      {#if error}<p class="error">{error}</p>{/if}
       <button class="primary" onclick={retryNow}>Retry now</button>
       <button class="link" onclick={cancelReconnect}>
         {pendingCreds ? "Cancel" : "Sign in with a different account"}
       </button>
+      <button class="link start-local" onclick={handleStartLocal} disabled={loading}>Start from scratch instead</button>
     </div>
   </main>
 {:else if !me}
@@ -796,43 +847,52 @@
       <button class="primary" type="submit" disabled={loading}>
         {loading ? "Signing in…" : "Sign in"}
       </button>
+      <button class="link start-local" type="button" onclick={handleStartLocal} disabled={loading}>
+        Start from scratch
+      </button>
+      <p class="local-hint">No Ferdium account needed. Services and workspaces stay on this Mac.</p>
     </form>
   </main>
 {:else}
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="account">
-        <strong>{me.firstname || me.email}</strong>
-        <button class="link" onclick={handleLogout}>sign out</button>
-      </div>
-
-      <button class="add" onclick={openAdd}>＋ Add a service</button>
-
-      <div class="wspills">
-        <button
-          class="pill"
-          class:on={activeWorkspace === null}
-          onclick={() => (activeWorkspace = null)}>All</button>
-        {#each workspaces as w (w.id)}
-          <button
-            class="pill"
-            class:on={activeWorkspace === w.id}
-            onclick={() => (activeWorkspace = w.id)}>{w.name}</button>
-        {/each}
-        <button class="pill mng" onclick={openWorkspaces} title="Manage workspaces">⚙</button>
-      </div>
-
-      <div class="svcarea">
-        <div class="svclist">
-          {#each visibleServices as s (s.id)}{@render row(s)}{/each}
+  <div class="shell" class:expanded={railExpanded}>
+    <aside class="sidebar" id="service-rail" aria-label="Services">
+      {#if railExpanded}
+        <div class="account">
+          <strong>{isLocal ? "Local profile" : me.firstname || me.email}</strong>
+          <button class="link" onclick={handleLogout}>{isLocal ? "switch" : "sign out"}</button>
         </div>
+        <button class="add" onclick={openAdd}>＋ Add a service</button>
+        <div class="wspills">
+          <button class="pill" class:on={activeWorkspace === null} onclick={() => chooseWorkspace(null)}>All</button>
+          {#each workspaces as w (w.id)}
+            <button class="pill" class:on={activeWorkspace === w.id} onclick={() => chooseWorkspace(w.id)}>{w.name}</button>
+          {/each}
+          <button class="pill mng" onclick={openWorkspaces} title="Manage workspaces" aria-label="Manage workspaces">⚙</button>
+        </div>
+      {/if}
+      <div class="svcarea">
+        <nav class="svclist" aria-label="Services">
+          {#each visibleServices as s (s.id)}{@render row(s)}{/each}
+        </nav>
       </div>
-
-      <button class="appcog" onclick={openAppSettings}>
-        <span class="ic">⚙</span> Settings{#if updateInfo}<span class="upddot" title="Update available"></span>{/if}
-      </button>
-      <div class="count">
-        {services.length} services · {workspaces.length} workspaces{#if appVer} · <span class="ver">v{appVer}</span>{/if}
+      <div class="rail-controls">
+        <button class="rail-control" class:active={view === "appSettings"} onclick={openAppSettings} aria-label="Settings" aria-current={view === "appSettings" ? "page" : undefined} title="Settings">
+          {@render gearIcon(22)}
+          {#if railExpanded}<span>Settings</span>{/if}
+          {#if updateInfo}<span class="rail-update-dot" aria-hidden="true"></span>{/if}
+        </button>
+        <button class="rail-control" onclick={toggleRail} aria-label={railExpanded ? "Collapse sidebar" : "Expand sidebar"} aria-controls="service-rail" aria-expanded={railExpanded} title={railExpanded ? "Collapse sidebar" : "Expand sidebar"}>
+          {#if railExpanded}
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+          {:else}
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          {/if}
+          {#if railExpanded}<span>Collapse sidebar</span>{/if}
+        </button>
       </div>
     </aside>
 
@@ -854,6 +914,18 @@
           {:else}
             <div class="placeholder"><h2>{activeService.name}</h2></div>
           {/if}
+        {:else if activeWorkspace && visibleServices.length === 0}
+          <div class="placeholder">
+            <h2>No services in this workspace</h2>
+            <p>Add existing services to it from Workspaces.</p>
+            <button class="primary" onclick={openWorkspaces}>Manage workspaces</button>
+          </div>
+        {:else if services.length === 0}
+          <div class="placeholder">
+            <h2>Add your first service</h2>
+            <p>{isLocal ? "Choose a service to begin. Your setup will be saved on this Mac." : "Choose a service to begin."}</p>
+            <button class="primary" onclick={openAdd}>Add a service</button>
+          </div>
         {:else}
           <div class="placeholder"><p>No service selected.</p></div>
         {/if}
@@ -913,8 +985,8 @@
               <p class="desc">Dark Reader fine-tuning (applies to this service's dark mode).</p>
             </div>
           {/if}
-          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon (synced with Ferdium; not rendered locally yet).", "useFavicon", settingsSvc.useFavicon === true)}
-          {@render toggle("Progress bar", "Ferdium setting (synced). Tauridium already shows a loading spinner per service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
+          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon (not rendered locally yet).", "useFavicon", settingsSvc.useFavicon === true)}
+          {@render toggle("Progress bar", "Tauridium already shows a loading spinner per service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
           <div class="setrow">
             <label class="block">
               Custom user agent
@@ -924,7 +996,7 @@
           </div>
 
           <div class="set-title">Proxy</div>
-          {@render toggle("Use a proxy", "Route this service through an HTTP/HTTPS proxy (synced with Ferdium).", "isProxyFeatureEnabled", settingsSvc.isProxyFeatureEnabled === true)}
+          {@render toggle("Use a proxy", "Route this service through an HTTP/HTTPS proxy.", "isProxyFeatureEnabled", settingsSvc.isProxyFeatureEnabled === true)}
           {#if settingsSvc.isProxyFeatureEnabled}
             <div class="setrow">
               <div class="proxy-grid">
@@ -950,7 +1022,7 @@
             <div class="dz-row">
               <div>
                 <strong>Delete service</strong>
-                <p class="dz-hint">Remove this service from your account and wipe its data.</p>
+                <p class="dz-hint">Remove this service {isLocal ? "from this Mac" : "from your account"} and wipe its data.</p>
               </div>
               <button class="danger sm" onclick={() => settingsSvc && handleDelete(settingsSvc)}>
                 Delete
@@ -1057,7 +1129,6 @@
             {@render appToggle("Close button hides to tray", `The window's close button hides Tauridium to the ${trayWord} instead of quitting it.`, "closeToSystemTray", appSettings.closeToSystemTray)}
           {:else if settingsTab === "services"}
             {@render appToggle("Show disabled services", "Keep disabled services visible (dimmed) in the sidebar instead of hiding them.", "showDisabledServices", appSettings.showDisabledServices)}
-            {@render appToggle("Show service names", "Show the name next to each service icon in the sidebar.", "showServiceName", appSettings.showServiceName)}
             {@render appToggle("Unread badge on muted services", "Still show the unread count on services that are muted.", "showMessageBadgeWhenMuted", appSettings.showMessageBadgeWhenMuted)}
             <div class="setrow">
               <label class="row-toggle">
@@ -1075,7 +1146,7 @@
               </label>
               <p class="desc">Unload inactive services (per-service "Allow hibernation" must be on) to save memory. A hibernated service stops reporting unread until you reopen it.</p>
             </div>
-            {@render appToggle("Preload services at startup", "Load your services in the background right after launch so switching to them is instant (uses more memory).", "preloadServices", appSettings.preloadServices)}
+            {@render appToggle("Preload services at startup", "Load every service immediately for instant switching and notifications. When off, unopened services load when selected; opened services keep running for notifications.", "preloadServices", appSettings.preloadServices)}
           {:else if settingsTab === "appearance"}
             <div class="setrow">
               <label class="row-toggle">
@@ -1110,22 +1181,7 @@
               <p class="desc">Highlight color for the active service, buttons and selected workspace.</p>
             </div>
 
-            <div class="set-title">Sidebar</div>
-            <div class="setrow">
-              <label class="row-toggle">
-                <span>Sidebar width</span>
-                <select
-                  class="select"
-                  bind:value={appSettings.sidebarWidth}
-                  onchange={() => saveAppSetting("sidebarWidth", appSettings.sidebarWidth)}
-                >
-                  <option value={200}>Compact</option>
-                  <option value={240}>Normal</option>
-                  <option value={300}>Wide</option>
-                </select>
-              </label>
-              <p class="desc">Width of the services sidebar.</p>
-            </div>
+            <div class="set-title">Service rail</div>
             <div class="setrow">
               <label class="row-toggle">
                 <span>Icon size</span>
@@ -1138,10 +1194,9 @@
                   <option value={21}>Small</option>
                   <option value={24}>Normal</option>
                   <option value={28}>Large</option>
-                  <option value={34}>Very large</option>
                 </select>
               </label>
-              <p class="desc">Size of the service icons in the sidebar.</p>
+              <p class="desc">Size of the service icons in the rail.</p>
             </div>
             <div class="setrow">
               <label class="row-toggle">
@@ -1156,7 +1211,7 @@
                   <option value="bottom">Bottom</option>
                 </select>
               </label>
-              <p class="desc">Vertical position of the service list in the sidebar.</p>
+              <p class="desc">Vertical position of the service icons in the rail.</p>
             </div>
             {@render appToggle("Grayscale service icons", "Show icons in grayscale; full color on hover and when active.", "grayscaleServices", appSettings.grayscaleServices)}
             {#if appSettings.grayscaleServices}
@@ -1189,9 +1244,14 @@
               </label>
               <p class="desc">Override the browser identity sent to services. Applies to newly opened services (restart to apply everywhere).</p>
             </div>
-            <div class="set-title">Server</div>
-            <code class="recipe">{server}</code>
-            <p class="sub">Signed in as {me.email}. Sign out to change server.</p>
+            {#if isLocal}
+              <div class="set-title">Profile</div>
+              <p class="sub">Services and workspaces are saved on this Mac. Switch account to sign in to a Ferdium server.</p>
+            {:else}
+              <div class="set-title">Server</div>
+              <code class="recipe">{server}</code>
+              <p class="sub">Signed in as {me.email}. Sign out to change server.</p>
+            {/if}
           {:else if settingsTab === "updates"}
             <div class="set-title">Version</div>
             <code class="recipe">Tauridium v{appVer}</code>
@@ -1221,19 +1281,24 @@
     class="srow-wrap"
     class:drag-over={dragOverId === s.id}
     class:dragging={dragId === s.id}
+    role="group"
+    aria-label={s.name}
     draggable="true"
-    role="listitem"
     ondragstart={(e) => onDragStart(e, s)}
     ondragover={(e) => onDragOver(e, s)}
     ondragleave={() => onDragLeave(s)}
     ondrop={(e) => onDrop(e, s)}
     ondragend={onDragEnd}
+    oncontextmenu={(e) => { e.preventDefault(); openServiceSettings(s); }}
   >
     <button
       class="srow"
-      class:active={s.id === activeId && view === "service"}
+      class:active={view === "service" && s.id === activeId}
       class:disabled={!s.isEnabled}
       class:asleep={hibernated.has(s.id)}
+      aria-label={s.name}
+      aria-current={view === "service" && s.id === activeId ? "page" : undefined}
+      title={`${s.name}${hibernated.has(s.id) ? " (hibernated)" : ""}`}
       onclick={() => selectService(s)}
     >
       {#if failedIcons.has(s.id)}
@@ -1241,18 +1306,26 @@
       {:else}
         <img class="svc-icon" src={iconSrc(s)} alt="" onerror={() => markIconFailed(s.id)} />
       {/if}
-      {#if appSettings.showServiceName}
-        <span class="srow-name">{s.name}</span>
-      {/if}
-      {#if hibernated.has(s.id)}<span class="zzz" title="Hibernated">💤</span>{/if}
+      {#if railExpanded}<span class="srow-name">{s.name}</span>{/if}
       {#if (unreadMap[s.id] ?? 0) > 0 && (s.isMuted !== true || appSettings.showMessageBadgeWhenMuted)}
         <span class="ubadge" class:muted={s.isMuted === true}>
           {unreadMap[s.id] > 99 ? "99+" : unreadMap[s.id]}
         </span>
       {/if}
     </button>
-    <button class="cog" title="Settings" onclick={() => openServiceSettings(s)}>⚙</button>
+    {#if railExpanded}
+      <button class="cog" aria-label={`Settings for ${s.name}`} title={`Settings for ${s.name}`} onclick={() => openServiceSettings(s)}>
+        {@render gearIcon(15)}
+      </button>
+    {/if}
   </div>
+{/snippet}
+
+{#snippet gearIcon(size: number)}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <polygon points="9.66,4.35 9.92,2.22 14.08,2.22 14.34,4.35 15.76,4.94 17.45,3.61 20.39,6.55 19.06,8.24 19.65,9.66 21.78,9.92 21.78,14.08 19.65,14.34 19.06,15.76 20.39,17.45 17.45,20.39 15.76,19.06 14.34,19.65 14.08,21.78 9.92,21.78 9.66,19.65 8.24,19.06 6.55,20.39 3.61,17.45 4.94,15.76 4.35,14.34 2.22,14.08 2.22,9.92 4.35,9.66 4.94,8.24 3.61,6.55 6.55,3.61 8.24,4.94" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
 {/snippet}
 
 {#snippet toggle(label: string, desc: string, key: keyof Service, checked: boolean)}
@@ -1321,73 +1394,97 @@
   }
   .primary:disabled { opacity: 0.6; cursor: default; }
   .gear { align-self: flex-start; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
+  .start-local { align-self: center; padding: 4px 8px; font-size: 13px; color: var(--text2); }
+  .start-local:hover { color: var(--accent-soft); }
+  .start-local:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .start-local:disabled { opacity: 0.6; cursor: default; }
+  .local-hint { margin: -4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; text-align: center; }
   .error { color: #ff8a8a; font-size: 13px; margin: 4px 0; }
 
-  .shell { display: grid; grid-template-columns: var(--sidebar-w, 240px) 1fr; height: 100vh; }
+  .shell { display: grid; grid-template-columns: 76px minmax(0, 1fr); height: 100vh; }
+  .shell.expanded { grid-template-columns: 240px minmax(0, 1fr); }
   .sidebar {
-    background: var(--sidebar); padding: 12px; overflow: hidden;
-    display: flex; flex-direction: column; gap: 12px;
+    background: var(--sidebar); border-right: 1px solid var(--border); padding: 10px 8px;
+    overflow: hidden; display: flex; flex-direction: column; align-items: center; gap: 10px;
   }
-  .svcarea { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
-  :global(body[data-svcloc="center"]) .svcarea { justify-content: center; }
-  :global(body[data-svcloc="bottom"]) .svcarea { justify-content: flex-end; }
-  .account { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
-  .link { background: none; border: none; color: var(--link); cursor: pointer; font-size: 12px; text-decoration: underline; }
+  .expanded .sidebar { align-items: stretch; padding: 14px 12px 10px; }
+  .account { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font-size: 13px; }
+  .account strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .account .link { flex: none; }
   .add {
     background: var(--hover); border: 1px dashed var(--border2); color: var(--accent-soft);
-    border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px;
+    border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px; text-align: left;
   }
   .add:hover { filter: brightness(1.1); }
   .wspills { display: flex; flex-wrap: wrap; gap: 5px; }
   .pill {
     background: var(--hover); border: none; color: var(--muted);
     border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .pill.on { background: var(--accent); color: var(--accent-fg); }
   .pill.mng { background: transparent; border: 1px dashed var(--border2); color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 9px; }
-  .svclist { display: flex; flex-direction: column; gap: 2px; }
+  .svcarea { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; scrollbar-width: none; }
+  .svcarea::-webkit-scrollbar { width: 0; }
+  :global(body[data-svcloc="center"]) .svclist { margin-block: auto; }
+  :global(body[data-svcloc="bottom"]) .svclist { margin-top: auto; }
+  .link { background: none; border: none; color: var(--link); cursor: pointer; font-size: 12px; text-decoration: underline; }
+  .rail-controls { width: 100%; flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .expanded .rail-controls { align-items: stretch; }
+  .rail-control {
+    position: relative; width: 50px; height: 50px; flex: none; display: flex; align-items: center;
+    justify-content: center; gap: 10px; padding: 0; background: none; border: none;
+    border-radius: 9px; color: var(--muted); cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .rail-control:hover { background: var(--hover); color: var(--text); }
+  .rail-control.active { background: color-mix(in srgb, var(--accent) 18%, var(--sidebar)); color: var(--text); }
+  .expanded .rail-control { width: 100%; justify-content: flex-start; padding: 0 12px; text-align: left; }
+  .rail-control svg { flex: none; }
+  .rail-update-dot { position: absolute; top: 9px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+  .svclist { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .expanded .svclist { align-items: stretch; gap: 2px; }
 
-  .srow-wrap { display: flex; align-items: center; position: relative; }
+  .srow-wrap { width: 50px; height: 50px; flex: none; position: relative; }
+  .expanded .srow-wrap { width: 100%; height: 48px; }
   .srow-wrap.dragging { opacity: 0.4; }
   .srow-wrap.drag-over::before {
-    content: ""; position: absolute; left: 6px; right: 6px; top: -1px;
-    height: 2px; background: var(--accent); border-radius: 2px;
+    content: ""; position: absolute; left: 8px; right: 8px; top: -3px;
+    height: 2px; background: var(--accent); border-radius: 2px; z-index: 1;
   }
   .srow {
-    display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0;
-    padding: 7px 8px; border: none; border-radius: 8px; background: none;
-    color: var(--text2); cursor: pointer; text-align: left; font-size: 14px;
+    width: 50px; height: 50px; display: flex; align-items: center; justify-content: center; position: relative;
+    padding: 0; border: none; border-radius: 10px; background: none;
+    color: var(--text2); cursor: pointer; font: inherit; font-size: 13px;
   }
+  .expanded .srow { width: 100%; height: 48px; justify-content: flex-start; gap: 10px; padding: 0 12px; text-align: left; }
   .srow:hover { background: var(--hover); }
-  .srow.active { background: var(--accent); color: var(--accent-fg); }
+  .srow.active { background: color-mix(in srgb, var(--accent) 18%, var(--sidebar)); }
   .srow.disabled { opacity: 0.45; }
   .srow.asleep .svc-icon, .srow.asleep .dot { filter: grayscale(1); opacity: 0.5; }
-  .zzz { margin-left: auto; font-size: 12px; opacity: 0.8; }
-  .svc-icon, .srow .dot { width: var(--icon-size, 22px); height: var(--icon-size, 22px); border-radius: 5px; object-fit: cover; flex: none; }
+  .svc-icon, .srow .dot { width: var(--icon-size, 24px); height: var(--icon-size, 24px); border-radius: 6px; object-fit: cover; flex: none; }
   .srow .dot { display: grid; place-items: center; background: var(--border2); font-size: 12px; font-weight: 700; }
+  .srow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   :global(body.grayscale) .svc-icon { filter: grayscale(1); opacity: var(--gray-op, 0.6); transition: filter 0.15s, opacity 0.15s; }
   :global(body.grayscale) .srow:hover .svc-icon,
   :global(body.grayscale) .srow.active .svc-icon { filter: none; opacity: 1; }
-  .srow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ubadge {
-    margin-left: auto; background: #e23b3b; color: #fff; font-size: 11px; font-weight: 700;
-    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; flex: none;
+    position: absolute; top: 1px; right: 0; background: #e23b3b; color: #fff; font-size: 10px; font-weight: 700;
+    min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px;
     display: inline-flex; align-items: center; justify-content: center;
   }
   .ubadge.muted { background: var(--muted2); }
-  .cog { background: none; border: none; color: var(--muted2); cursor: pointer; font-size: 21px; line-height: 1; opacity: 0; padding: 2px 4px; }
-  .srow-wrap:hover .cog { opacity: 1; }
-  .cog:hover { color: var(--accent-soft); }
-  .appcog {
-    background: var(--hover); border: 1px solid var(--border);
-    color: var(--text2); border-radius: 8px; padding: 9px; cursor: pointer; font-size: 13px;
-    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  .expanded .ubadge { position: static; margin-left: auto; flex: none; }
+  .cog {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 24px; height: 24px; display: grid; place-items: center;
+    padding: 0; background: var(--card); border: 1px solid var(--border2); border-radius: 7px;
+    color: var(--text2); cursor: pointer; opacity: 0; pointer-events: none; z-index: 1;
   }
-  .appcog .ic { font-size: 19px; line-height: 1; }
-  .upddot { width: 8px; height: 8px; border-radius: 999px; background: #22c55e; display: inline-block; margin-left: 2px; }
-  .appcog:hover { filter: brightness(1.1); }
-  .count { font-size: 11px; color: var(--muted2); }
-  .ver { font-weight: 700; color: var(--muted); }
+  .srow-wrap:hover .cog, .srow-wrap:focus-within .cog { opacity: 1; pointer-events: auto; }
+  .expanded .srow-wrap:hover .ubadge, .expanded .srow-wrap:focus-within .ubadge { opacity: 0; }
+  .cog:hover { color: var(--accent-soft); }
+  .rail-control:focus-visible, .srow:focus-visible, .cog:focus-visible,
+  .add:focus-visible, .pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .stage { display: grid; place-items: center; overflow: auto; }
   .placeholder { text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }

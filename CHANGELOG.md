@@ -1,5 +1,7 @@
 # Changelog
 
+![Tauridium's compact service rail showing GitHub](docs/images/changelog-heading.png)
+
 All notable changes to Tauridium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
@@ -11,6 +13,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 > history, so they are more terse than the process going forward.
 
 ## [Unreleased]
+
+### Added
+- **Account-free local profile.** Start from scratch without a Ferdium server;
+  services and workspaces are stored on this device and use the Ferdium recipe
+  catalog.
+- **Collapsible service rail.** Switch between compact service icons and an
+  expanded sidebar with service names, workspaces, and account controls.
+
+### Changed
+- Load services on demand by default instead of preloading every enabled web
+  app. Services already opened keep running for notifications.
+- Check recipe badges every five seconds and avoid sending unchanged unread
+  counts to the shell.
 
 ## [0.1.12] - 2026-09-08
 ### Fixed

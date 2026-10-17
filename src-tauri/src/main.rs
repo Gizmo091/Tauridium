@@ -9,6 +9,7 @@
 //           (data_directory est ignoré par WKWebView sur macOS — cf. Phase 0).
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -47,8 +48,9 @@ static DOWNLOAD_NAMES: LazyLock<Mutex<HashMap<String, String>>> =
 
 // User-agent pour les appels API serveur Ferdium / récupération des recipes.
 const API_UA: &str = concat!("Tauridium/", env!("CARGO_PKG_VERSION"));
-// Largeur (logique) de la sidebar — doit coïncider avec le CSS du shell.
-const SIDEBAR_W: f64 = 240.0;
+// Largeur (logique) du rail de services — doit coïncider avec le CSS du shell.
+const SIDEBAR_W: f64 = 76.0;
+const SIDEBAR_EXPANDED_W: f64 = 240.0;
 // UA Safari moderne AVEC le token `Version/` : WhatsApp exige Safari >= 15, or la webview
 // WKWebView native n'expose pas toujours ce token (-> "navigateur non supporté"). On reste
 // du Safari (pas Chrome) pour ne pas casser les services qui dépendent du chemin Safari
@@ -110,12 +112,14 @@ fn is_google_host(host: &str) -> bool {
 struct AppState {
     server: Mutex<Option<String>>,
     token: Mutex<Option<String>>,
+    local_mode: Mutex<bool>,
+    local_data_lock: Mutex<()>,
     created: Mutex<HashSet<String>>, // serviceId des webviews déjà créées
     active: Mutex<Option<String>>,   // serviceId actuellement affiché
     unread: Mutex<HashMap<String, i64>>, // non-lus par service (pour le badge dock)
     flags: Mutex<HashMap<String, ServiceFlags>>, // réglages par service (notif/mute/badge)
     settings: Mutex<Value>,          // cache des réglages app (lu par le poller, etc.)
-    sidebar_w: Mutex<f64>,           // largeur de la sidebar (init en setup, def. 240)
+    sidebar_w: Mutex<f64>,           // largeur du rail, synchronisée avec le shell
     desired_active: Mutex<Option<String>>, // dernier service demandé (anti vol de focus au switch)
     inflight: Mutex<HashSet<String>>, // webviews en cours de création (anti double add_child)
     homes: Mutex<HashMap<String, String>>, // URL d'origine par service (menu « Home »)
@@ -154,9 +158,93 @@ fn normalize_server(server: &str) -> String {
 // Écriture atomique : .tmp puis rename. Évite un fichier tronqué si l'app crashe pendant
 // l'écriture (sinon session.json / app_settings.json peuvent devenir illisibles).
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, contents)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())?;
+    drop(file);
     std::fs::rename(&tmp, path)
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct LocalData {
+    services: Vec<Value>,
+    workspaces: Vec<Value>,
+}
+
+fn local_data_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("local_data.json"))
+}
+
+fn read_local_data(path: &Path) -> Result<LocalData, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("Local data is invalid: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LocalData::default()),
+        Err(e) => Err(format!("Cannot read local data: {e}")),
+    }
+}
+
+fn write_local_data(path: &Path, data: &LocalData) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string(data).map_err(|e| e.to_string())?;
+    write_atomic(path, &text).map_err(|e| format!("Cannot save local data: {e}"))
+}
+
+fn is_local(state: &State<'_, AppState>) -> bool {
+    *state.local_mode.lock().unwrap()
+}
+
+fn mutate_local_data<T>(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    change: impl FnOnce(&mut LocalData) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = state.local_data_lock.lock().unwrap();
+    let path = local_data_path(app)?;
+    let mut data = read_local_data(&path)?;
+    let result = change(&mut data)?;
+    write_local_data(&path, &data)?;
+    Ok(result)
+}
+
+fn local_user() -> Value {
+    serde_json::json!({
+        "id": "local",
+        "email": "",
+        "firstname": "Local",
+        "lastname": "",
+        "mode": "local"
+    })
+}
+
+fn remove_local_service(data: &mut LocalData, service_id: &str) -> Result<(), String> {
+    let before = data.services.len();
+    data.services
+        .retain(|s| s.get("id").and_then(Value::as_str) != Some(service_id));
+    if data.services.len() == before {
+        return Err("Service not found".into());
+    }
+    for workspace in &mut data.workspaces {
+        if let Some(services) = workspace.get_mut("services").and_then(Value::as_array_mut) {
+            services.retain(|id| id.as_str() != Some(service_id));
+        }
+    }
+    Ok(())
 }
 
 async fn api_get(base: &str, token: &str, path: &str) -> Result<Value, String> {
@@ -245,9 +333,28 @@ async fn login(
     {
         *state.server.lock().unwrap() = Some(base.clone());
         *state.token.lock().unwrap() = Some(token.clone());
+        *state.local_mode.lock().unwrap() = false;
     }
     save_session(&app, &base, &token);
     api_get(&base, &token, "/v1/me").await
+}
+
+#[tauri::command]
+fn start_local(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let data_path = local_data_path(&app)?;
+    // Check the existing store before selecting local mode. Never replace corrupt data.
+    let data = read_local_data(&data_path)?;
+    if !data_path.exists() {
+        write_local_data(&data_path, &data)?;
+    }
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join("session.json"), r#"{"mode":"local"}"#)
+        .map_err(|e| format!("Cannot save local session: {e}"))?;
+    *state.server.lock().unwrap() = None;
+    *state.token.lock().unwrap() = None;
+    *state.local_mode.lock().unwrap() = true;
+    Ok(local_user())
 }
 
 // Restaure une session enregistrée au démarrage : valide le token via /v1/me.
@@ -257,6 +364,13 @@ async fn restore_session(app: AppHandle, state: State<'_, AppState>) -> Result<V
     let path = dir.join("session.json");
     let text = std::fs::read_to_string(&path).map_err(|_| "Aucune session".to_string())?;
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if v.get("mode").and_then(Value::as_str) == Some("local") {
+        read_local_data(&local_data_path(&app)?)?;
+        *state.server.lock().unwrap() = None;
+        *state.token.lock().unwrap() = None;
+        *state.local_mode.lock().unwrap() = true;
+        return Ok(local_user());
+    }
     let server = v
         .get("server")
         .and_then(Value::as_str)
@@ -286,6 +400,7 @@ async fn restore_session(app: AppHandle, state: State<'_, AppState>) -> Result<V
                 .map_err(|e| format!("Réponse /v1/me illisible : {e}"))?;
             *state.server.lock().unwrap() = Some(server);
             *state.token.lock().unwrap() = Some(token);
+            *state.local_mode.lock().unwrap() = false;
             Ok(me)
         }
         Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
@@ -317,13 +432,25 @@ fn current(state: &State<'_, AppState>) -> Result<(String, String), String> {
 }
 
 #[tauri::command]
-async fn get_services(state: State<'_, AppState>) -> Result<Value, String> {
+async fn get_services(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    if is_local(&state) {
+        let _guard = state.local_data_lock.lock().unwrap();
+        return Ok(serde_json::json!(
+            read_local_data(&local_data_path(&app)?)?.services
+        ));
+    }
     let (base, token) = current(&state)?;
     api_get(&base, &token, "/v1/me/services").await
 }
 
 #[tauri::command]
-async fn get_workspaces(state: State<'_, AppState>) -> Result<Value, String> {
+async fn get_workspaces(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    if is_local(&state) {
+        let _guard = state.local_data_lock.lock().unwrap();
+        return Ok(serde_json::json!(
+            read_local_data(&local_data_path(&app)?)?.workspaces
+        ));
+    }
     let (base, token) = current(&state)?;
     api_get(&base, &token, "/v1/workspace").await
 }
@@ -466,6 +593,8 @@ fn dark_reader_init(o: DarkOpts) -> String {
     )
 }
 
+// Les recettes sondent les badges ; WhatsApp relit IndexedDB à chaque passage.
+// Cinq secondes gardent les compteurs utiles sans relancer cette requête chaque seconde.
 const RECIPE_PREAMBLE: &str = r#"(function(){
   try {
     var module = { exports: {} };
@@ -477,7 +606,7 @@ const RECIPE_PREAMBLE: &str = r#"(function(){
       safeParseInt: function(v){ var n=parseInt(v,10); return isNaN(n)?0:n; },
       injectCSS: function(){}, injectJSUnsafe: function(){},
       setDialogTitle: function(){}, handleDarkMode: function(){},
-      loop: function(cb){ try{cb();}catch(e){} setInterval(function(){ try{cb();}catch(e){} }, 1000); }
+      loop: function(cb){ try{cb();}catch(e){} setInterval(function(){ try{cb();}catch(e){} }, 5000); }
     };
     window.Ferdium = Ferdium;
 "#;
@@ -1117,10 +1246,14 @@ fn close_service(app: AppHandle, state: State<'_, AppState>, service_id: String)
     }
 }
 
-// Change la largeur de la sidebar et repositionne la webview du service actif.
+// Le shell a deux largeurs fixes ; la webview native doit suivre le rail.
 #[tauri::command]
 fn set_sidebar_width(app: AppHandle, state: State<'_, AppState>, width: f64) {
-    *state.sidebar_w.lock().unwrap() = width.clamp(160.0, 420.0);
+    *state.sidebar_w.lock().unwrap() = if width >= (SIDEBAR_W + SIDEBAR_EXPANDED_W) / 2.0 {
+        SIDEBAR_EXPANDED_W
+    } else {
+        SIDEBAR_W
+    };
     reposition_active(&app);
 }
 
@@ -1161,10 +1294,28 @@ fn set_service_flags(
 // Modifie un service (réglages) -> PUT /v1/service/:id. `patch` doit inclure `name`.
 #[tauri::command]
 async fn update_service(
+    app: AppHandle,
     state: State<'_, AppState>,
     service_id: String,
     patch: Value,
 ) -> Result<Value, String> {
+    if is_local(&state) {
+        return mutate_local_data(&app, &state, |data| {
+            let service = data
+                .services
+                .iter_mut()
+                .find(|s| s.get("id").and_then(Value::as_str) == Some(service_id.as_str()))
+                .ok_or("Service not found")?;
+            let fields = patch.as_object().ok_or("Invalid service update")?;
+            let object = service.as_object_mut().ok_or("Invalid local service")?;
+            for (key, value) in fields {
+                if key != "id" && key != "recipeId" {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+            Ok(service.clone())
+        });
+    }
     let (base, token) = current(&state)?;
     let res = HTTP
         .clone()
@@ -1184,10 +1335,35 @@ async fn update_service(
 // Crée un service -> POST /v1/service.
 #[tauri::command]
 async fn create_service(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
     recipe_id: String,
 ) -> Result<Value, String> {
+    if is_local(&state) {
+        if recipe_id.is_empty()
+            || !recipe_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err("Invalid recipe ID".into());
+        }
+        return mutate_local_data(&app, &state, |data| {
+            let service = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": name,
+                "recipeId": recipe_id,
+                "iconUrl": Value::Null,
+                "isEnabled": true,
+                "isMuted": false,
+                "isNotificationEnabled": true,
+                "isBadgeEnabled": true,
+                "order": data.services.len()
+            });
+            data.services.push(service.clone());
+            Ok(service)
+        });
+    }
     let (base, token) = current(&state)?;
     let res = HTTP
         .clone()
@@ -1211,17 +1387,21 @@ async fn delete_service(
     state: State<'_, AppState>,
     service_id: String,
 ) -> Result<(), String> {
-    let (base, token) = current(&state)?;
-    let res = HTTP
-        .clone()
-        .delete(format!("{base}/v1/service/{service_id}"))
-        .bearer_auth(&token)
-        .header(reqwest::header::USER_AGENT, API_UA)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("Suppression du service : HTTP {}", res.status()));
+    if is_local(&state) {
+        mutate_local_data(&app, &state, |data| remove_local_service(data, &service_id))?;
+    } else {
+        let (base, token) = current(&state)?;
+        let res = HTTP
+            .clone()
+            .delete(format!("{base}/v1/service/{service_id}"))
+            .bearer_auth(&token)
+            .header(reqwest::header::USER_AGENT, API_UA)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !res.status().is_success() {
+            return Err(format!("Suppression du service : HTTP {}", res.status()));
+        }
     }
     if let Some(wv) = app.get_webview(&format!("svc-{service_id}")) {
         let _ = wv.close();
@@ -1256,26 +1436,98 @@ fn clear_service_cache(app: AppHandle, state: State<'_, AppState>, service_id: S
 // Catalogue complet de recipes -> GET /v1/recipes. Le filtre se fait côté frontend.
 // (Le serveur officiel ne sert pas /recipes/search — il renvoie [].)
 #[tauri::command]
-async fn list_recipes(state: State<'_, AppState>) -> Result<Value, String> {
-    let (base, token) = current(&state)?;
-    let res = HTTP
-        .clone()
-        .get(format!("{base}/v1/recipes"))
-        .bearer_auth(&token)
-        .header(reqwest::header::USER_AGENT, API_UA)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("Catalogue de recipes : HTTP {}", res.status()));
+async fn list_recipes(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    if is_local(&state) {
+        let cache = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("recipe_catalog.json");
+        let cached = std::fs::read_to_string(&cache)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let fresh = std::fs::metadata(&cache)
+            .and_then(|m| m.modified())
+            .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+            .is_ok_and(|age| age < Duration::from_secs(24 * 60 * 60));
+        if fresh {
+            if let Some(catalog) = cached.as_ref() {
+                return Ok(catalog.clone());
+            }
+        }
+        let response = HTTP
+            .clone()
+            .get("https://api.github.com/repos/ferdium/ferdium-recipes/contents/recipes?ref=main")
+            .header(reqwest::header::USER_AGENT, API_UA)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await;
+        match response {
+            Ok(res) if res.status().is_success() => {
+                let entries: Vec<Value> = res.json().await.map_err(|e| e.to_string())?;
+                let catalog: Vec<Value> = entries
+                    .iter()
+                    .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("dir"))
+                    .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+                    .map(|id| serde_json::json!({
+                        "id": id,
+                        "name": id.replace(['-', '_'], " "),
+                        "icons": { "svg": format!("https://raw.githubusercontent.com/ferdium/ferdium-recipes/main/recipes/{id}/icon.svg") }
+                    }))
+                    .collect();
+                let value = serde_json::json!(catalog);
+                if let Some(dir) = cache.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = write_atomic(&cache, &value.to_string());
+                Ok(value)
+            }
+            Ok(res) => {
+                cached.ok_or_else(|| format!("Recipe catalog unavailable: HTTP {}", res.status()))
+            }
+            Err(e) => cached.ok_or_else(|| format!("Recipe catalog unavailable: {e}")),
+        }
+    } else {
+        let (base, token) = current(&state)?;
+        let res = HTTP
+            .clone()
+            .get(format!("{base}/v1/recipes"))
+            .bearer_auth(&token)
+            .header(reqwest::header::USER_AGENT, API_UA)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !res.status().is_success() {
+            return Err(format!("Catalogue de recipes : HTTP {}", res.status()));
+        }
+        res.json().await.map_err(|e| e.to_string())
     }
-    res.json().await.map_err(|e| e.to_string())
 }
 
 // --- Workspaces -----------------------------------------------------------
 
 #[tauri::command]
-async fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Value, String> {
+async fn create_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Value, String> {
+    if is_local(&state) {
+        if name.trim().is_empty() {
+            return Err("Workspace name cannot be empty".into());
+        }
+        return mutate_local_data(&app, &state, |data| {
+            let workspace = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": name.trim(),
+                "order": data.workspaces.len(),
+                "services": [],
+                "userId": "local"
+            });
+            data.workspaces.push(workspace.clone());
+            Ok(workspace)
+        });
+    }
     let (base, token) = current(&state)?;
     let res = HTTP
         .clone()
@@ -1294,11 +1546,24 @@ async fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Va
 
 #[tauri::command]
 async fn update_workspace(
+    app: AppHandle,
     state: State<'_, AppState>,
     workspace_id: String,
     name: String,
     services: Vec<String>,
 ) -> Result<Value, String> {
+    if is_local(&state) {
+        return mutate_local_data(&app, &state, |data| {
+            let workspace = data
+                .workspaces
+                .iter_mut()
+                .find(|w| w.get("id").and_then(Value::as_str) == Some(workspace_id.as_str()))
+                .ok_or("Workspace not found")?;
+            workspace["name"] = serde_json::json!(name);
+            workspace["services"] = serde_json::json!(services);
+            Ok(workspace.clone())
+        });
+    }
     let (base, token) = current(&state)?;
     let res = HTTP
         .clone()
@@ -1316,7 +1581,22 @@ async fn update_workspace(
 }
 
 #[tauri::command]
-async fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<(), String> {
+async fn delete_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<(), String> {
+    if is_local(&state) {
+        return mutate_local_data(&app, &state, |data| {
+            let before = data.workspaces.len();
+            data.workspaces
+                .retain(|w| w.get("id").and_then(Value::as_str) != Some(workspace_id.as_str()));
+            if data.workspaces.len() == before {
+                return Err("Workspace not found".into());
+            }
+            Ok(())
+        });
+    }
     let (base, token) = current(&state)?;
     let res = HTTP
         .clone()
@@ -1336,6 +1616,7 @@ async fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> R
 fn logout(app: AppHandle, state: State<'_, AppState>) {
     *state.server.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
+    *state.local_mode.lock().unwrap() = false;
     clear_session(&app);
 }
 
@@ -1344,10 +1625,10 @@ fn reposition_active(app: &AppHandle) {
     let st = app.state::<AppState>();
     let active = st.active.lock().unwrap().clone();
     let Some(sid) = active else { return };
-    let sw = *st.sidebar_w.lock().unwrap();
     let Some(win) = app.get_window("main") else {
         return;
     };
+    let sw = *st.sidebar_w.lock().unwrap();
     if let Ok((pos, size)) = service_rect(&win, sw) {
         if let Some(wv) = app.get_webview(&format!("svc-{sid}")) {
             let _ = wv.set_position(pos);
@@ -1420,11 +1701,11 @@ fn start_badge_poller(app: AppHandle) {
                     let still_exists = st.created.lock().unwrap().contains(&sid);
                     let (map, total) = {
                         let mut m = st.unread.lock().unwrap();
-                        if still_exists {
-                            m.insert(sid.clone(), unread);
+                        let unread_changed = if still_exists {
+                            m.insert(sid.clone(), unread) != Some(unread)
                         } else {
-                            m.remove(&sid);
-                        }
+                            m.remove(&sid).is_some()
+                        };
                         let f = st.flags.lock().unwrap();
                         let total: i64 = m
                             .iter()
@@ -1437,9 +1718,11 @@ fn start_badge_poller(app: AppHandle) {
                                 }
                             })
                             .sum();
-                        (m.clone(), total)
+                        (unread_changed.then(|| m.clone()), total)
                     };
-                    let _ = app2.emit("unread", &map);
+                    if let Some(map) = map {
+                        let _ = app2.emit("unread", &map);
+                    }
                     if let Some(win) = app2.get_window("main") {
                         let _ = win.set_badge_count(if total > 0 { Some(total) } else { None });
                     }
@@ -1467,16 +1750,14 @@ fn read_app_settings_value(app: &AppHandle) -> Value {
         "closeToSystemTray": true,
         "privateNotifications": false,
         "showDisabledServices": true,
-        "showServiceName": true,
         "showMessageBadgeWhenMuted": true,
         "userAgentPref": "",
-        "sidebarWidth": 240,
         "iconSize": 24,
         "grayscaleServices": false,
         "grayscaleDim": 50,
         "sidebarServicesLocation": "top",
         "hibernationTimer": 0,
-        "preloadServices": true
+        "preloadServices": false
     });
     if let Some(p) = app_settings_path(app) {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -1633,6 +1914,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn local_data_survives_reload_and_service_removal_updates_workspaces() {
+        let dir =
+            std::env::temp_dir().join(format!("tauridium-local-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("local_data.json");
+        assert!(read_local_data(&path).unwrap().services.is_empty());
+
+        let mut data = LocalData {
+            services: vec![
+                json!({ "id": "one", "name": "First" }),
+                json!({ "id": "two", "name": "Second" }),
+            ],
+            workspaces: vec![json!({ "id": "workspace", "services": ["one", "two"] })],
+        };
+        write_local_data(&path, &data).unwrap();
+        data = read_local_data(&path).unwrap();
+        remove_local_service(&mut data, "one").unwrap();
+        write_local_data(&path, &data).unwrap();
+
+        let restored = read_local_data(&path).unwrap();
+        assert_eq!(restored.services.len(), 1);
+        assert_eq!(restored.services[0]["id"], "two");
+        assert_eq!(restored.workspaces[0]["services"], json!(["two"]));
+        assert!(remove_local_service(&mut data, "missing").is_err());
+
+        std::fs::write(&path, "{bad json").unwrap();
+        assert!(read_local_data(&path).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn password_hash_is_base64_of_sha256() {
         // sha256("password") encodé en base64 (cf. UserApi.ts de ferdium-app).
         assert_eq!(
@@ -1735,19 +2046,7 @@ fn main() {
             // Cache des réglages app en mémoire (lu par le poller, la fermeture, etc.).
             *app.state::<AppState>().settings.lock().unwrap() =
                 read_app_settings_value(&app.handle());
-            {
-                let st = app.state::<AppState>();
-                let w = st
-                    .settings
-                    .lock()
-                    .unwrap()
-                    .get("sidebarWidth")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(SIDEBAR_W)
-                    .clamp(160.0, 420.0); // évite qu'un réglage corrompu masque le service
-                *st.sidebar_w.lock().unwrap() = w;
-            }
-
+            *app.state::<AppState>().sidebar_w.lock().unwrap() = SIDEBAR_W;
             let handle = app.handle().clone();
             if let Some(win) = app.get_window("main") {
                 win.on_window_event(move |event| match event {
@@ -1951,6 +2250,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             login,
+            start_local,
             restore_session,
             get_services,
             get_workspaces,

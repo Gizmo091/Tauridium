@@ -20,8 +20,8 @@
 </p>
 
 A lightweight desktop client for [Ferdium](https://ferdium.org), built with
-**Tauri v2** (Rust + native WebView) instead of Electron — while staying fully
-connected to your Ferdium **server** (same account, synced services & workspaces).
+**Tauri v2** (Rust + native WebView) instead of Electron. Sign in to sync with a
+Ferdium server, or start from scratch with services and workspaces saved locally.
 
 > ⚡️ **This project is vibe-coded.** It was built end-to-end in a
 > pair-programming session with an AI assistant (Claude / Claude Code). The
@@ -34,21 +34,29 @@ suffix kept and **Tauri** baked in.
 ## Why
 
 Ferdium is great, but Electron makes it heavy. Tauridium renders each service in
-its own **isolated native WebView** (per-service persistent sessions), talks to
-the **Ferdium server REST API** for auth / services / workspaces, and stays lean.
+its own **isolated native WebView** (per-service persistent sessions). It can
+sync with the **Ferdium server REST API** or keep your setup on this device.
 
 ## Features
 
 - Sign in to your Ferdium server — account, services and workspaces stay synced
+- Start from scratch without an account — services and workspaces stay on this device
 - Each service in an **isolated, persistent session** (native WebView)
+- Services load on demand by default to avoid opening every web app at startup
 - **Native notifications** + dock unread badges
 - **Close-to-tray**, run in background, launch at login
 - **Per-service settings** (name, custom URL, team, notifications, mute, badges,
-  hibernation, dark mode, favicon, proxy, custom user agent…) — synced with Ferdium
+  hibernation, dark mode, favicon, proxy, custom user agent…) — synced when signed in
 - **App settings in tabs**: General / Services / Appearance / Privacy / Advanced
-- **Sidebar customization** aligned with Ferdium (icon size, services location,
-  grayscale + dim level, width)
+- **Collapsible service rail** with compact icons; expand it to see service labels,
+  workspaces, account actions and Add a service. App settings have a gear shortcut.
+- Service rail customization (icon size, services location, grayscale + dim level)
 - Theme (system / dark / light) + accent color (Tauri yellow by default)
+
+Local mode uses the public Ferdium recipes repository on GitHub for its service
+catalog and recipe definitions. Your locally created services and workspaces are
+stored in Tauridium's app data directory and are not synced to a Ferdium account.
+Switching to a server account keeps the local setup on this device for later.
 
 ## Tech stack
 

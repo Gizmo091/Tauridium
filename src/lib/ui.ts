@@ -39,7 +39,7 @@ export function filterRecipes<T extends { id: string; name: string }>(
 
 // Ramène une taille d'icône sur le niveau Ferdium valide le plus proche.
 export function snapIconSize(size: number): number {
-  const sizes = [18, 21, 24, 28, 34];
+  const sizes = [18, 21, 24, 28];
   if (sizes.includes(size)) return size;
   return sizes.reduce((a, b) => (Math.abs(b - size) < Math.abs(a - size) ? b : a));
 }

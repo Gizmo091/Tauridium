@@ -59,11 +59,11 @@ describe("filterRecipes", () => {
 describe("snapIconSize", () => {
   it("keeps valid Ferdium levels", () => {
     expect(snapIconSize(24)).toBe(24);
-    expect(snapIconSize(34)).toBe(34);
+    expect(snapIconSize(34)).toBe(28);
   });
   it("snaps legacy values to the nearest level", () => {
     expect(snapIconSize(30)).toBe(28);
     expect(snapIconSize(20)).toBe(21);
-    expect(snapIconSize(100)).toBe(34);
+    expect(snapIconSize(100)).toBe(28);
   });
 });

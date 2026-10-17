@@ -7,6 +7,7 @@ export interface MeUser {
   lastname: string;
   id: string;
   locale?: string;
+  mode?: "local";
   [k: string]: unknown;
 }
 
@@ -68,6 +69,10 @@ export function login(
   password: string,
 ): Promise<MeUser> {
   return invoke("login", { server, email, password });
+}
+
+export function startLocal(): Promise<MeUser> {
+  return invoke("start_local");
 }
 
 export function getServices(): Promise<Service[]> {
@@ -193,10 +198,8 @@ export interface AppSettings {
   closeToSystemTray: boolean;
   privateNotifications: boolean;
   showDisabledServices: boolean;
-  showServiceName: boolean;
   showMessageBadgeWhenMuted: boolean;
   userAgentPref: string;
-  sidebarWidth: number;
   iconSize: number;
   grayscaleServices: boolean;
   grayscaleDim: number;
@@ -204,10 +207,6 @@ export interface AppSettings {
   hibernationTimer: number;
   preloadServices: boolean;
   [k: string]: unknown;
-}
-
-export function setSidebarWidth(width: number): Promise<void> {
-  return invoke("set_sidebar_width", { width });
 }
 
 export function getAppSettings(): Promise<AppSettings> {
@@ -220,3 +219,6 @@ export function setAppSettings(
   return invoke("set_app_settings", { patch });
 }
 
+export function setSidebarWidth(width: number): Promise<void> {
+  return invoke("set_sidebar_width", { width });
+}
