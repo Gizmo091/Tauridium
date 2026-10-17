@@ -20,12 +20,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   catalog.
 - **Collapsible service rail.** Switch between compact service icons and an
   expanded sidebar with service names, workspaces, and account controls.
+- **Custom services.** Add any website as a service: type its name or address
+  in the catalog filter and choose "Create … as a custom service". Uses
+  Ferdium's Custom Website recipe, so it syncs with Ferdium accounts.
+- **Favicon icons.** "Use favicon as icon" now works: Tauridium fetches the
+  site's favicon (preferring SVG or the largest size) and caches it.
+  Custom services use it by default.
 
 ### Changed
 - Load services on demand by default instead of preloading every enabled web
   app. Services already opened keep running for notifications.
 - Check recipe badges every five seconds and avoid sending unchanged unread
   counts to the shell.
+- Show capitalized service names in local mode ("Amazon Web Services",
+  "WhatsApp") in the catalog and the rail; existing local services are renamed
+  automatically unless you gave them a custom name.
 
 ## [0.1.12] - 2026-09-08
 ### Fixed

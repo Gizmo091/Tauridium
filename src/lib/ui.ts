@@ -17,9 +17,42 @@ export function recipeIcon(recipeId: string): string {
   return `https://raw.githubusercontent.com/ferdium/ferdium-recipes/main/recipes/${recipeId}/icon.svg`;
 }
 
-// Icône d'un service : icône custom du serveur sinon celle de la recette.
-export function iconSrc(s: { iconUrl?: string | null; recipeId: string }): string {
+// Recette Ferdium « Custom Website » : n'importe quel site, via son customUrl.
+export const CUSTOM_RECIPE_ID = "franz-custom-website";
+
+// Icône d'un service : favicon du site si activé et récupéré, sinon icône custom du
+// serveur, sinon celle de la recette.
+export function iconSrc(
+  s: { iconUrl?: string | null; recipeId: string; useFavicon?: boolean },
+  favicon?: string,
+): string {
+  if (s.useFavicon && favicon) return favicon;
   return s.iconUrl || recipeIcon(s.recipeId);
+}
+
+// Adresse saisie -> URL http(s) normalisée, ou null si ce n'est pas une adresse web.
+export function normalizeServiceUrl(input: string): string | null {
+  const raw = input.trim();
+  if (!raw || /\s/.test(raw)) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withScheme);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (!url.hostname.includes(".") && url.hostname !== "localhost") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+// Pré-remplissage du formulaire de service perso depuis le texte du filtre :
+// « superme.ai » -> { name: "Superme", url: "https://superme.ai/" } ; « Superme » -> nom seul.
+export function customServiceDraft(query: string): { name: string; url: string } {
+  const q = query.trim();
+  const url = q.includes(".") ? normalizeServiceUrl(q) : null;
+  if (!url) return { name: q, url: "" };
+  const label = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
+  return { name: label.charAt(0).toUpperCase() + label.slice(1), url };
 }
 
 // Filtre + tri du catalogue de recettes (écran d'ajout de service).

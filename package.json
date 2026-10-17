@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",
+    "@tauri-apps/cli": "^2.12.2",
     "@tsconfig/svelte": "^5",
     "svelte": "^5",
     "svelte-check": "^4",

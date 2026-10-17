@@ -174,6 +174,15 @@ export function listRecipes(): Promise<RecipePreview[]> {
   return invoke("list_recipes");
 }
 
+// Favicon du site du service (data URL, cachée côté Rust) ; null si introuvable.
+export function serviceFavicon(s: Service): Promise<string | null> {
+  return invoke("service_favicon", {
+    recipeId: s.recipeId,
+    customUrl: (s.customUrl as string | undefined) ?? null,
+    team: (s.team as string | undefined) ?? null,
+  });
+}
+
 export function createWorkspace(name: string): Promise<Workspace> {
   return invoke("create_workspace", { name });
 }

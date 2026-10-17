@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { accentFg, recipeIcon, iconSrc, filterRecipes, snapIconSize } from "./ui";
+import {
+  accentFg,
+  recipeIcon,
+  iconSrc,
+  filterRecipes,
+  snapIconSize,
+  normalizeServiceUrl,
+  customServiceDraft,
+} from "./ui";
 
 describe("accentFg", () => {
   it("returns dark text on light accents (Tauri yellow)", () => {
@@ -65,5 +73,42 @@ describe("snapIconSize", () => {
     expect(snapIconSize(30)).toBe(28);
     expect(snapIconSize(20)).toBe(21);
     expect(snapIconSize(100)).toBe(28);
+  });
+});
+
+describe("favicon icons", () => {
+  const fav = "data:image/png;base64,AAAA";
+  it("uses the favicon only when enabled and fetched", () => {
+    expect(iconSrc({ recipeId: "x", useFavicon: true, iconUrl: "https://srv/i" }, fav)).toBe(fav);
+    expect(iconSrc({ recipeId: "x", useFavicon: false }, fav)).toBe(recipeIcon("x"));
+    expect(iconSrc({ recipeId: "x", useFavicon: true })).toBe(recipeIcon("x"));
+  });
+});
+
+describe("normalizeServiceUrl", () => {
+  it("adds https and keeps paths", () => {
+    expect(normalizeServiceUrl(" superme.ai ")).toBe("https://superme.ai/");
+    expect(normalizeServiceUrl("http://intra.example.com/app")).toBe("http://intra.example.com/app");
+    expect(normalizeServiceUrl("localhost:3000")).toBe("https://localhost:3000/");
+  });
+  it("rejects non-addresses", () => {
+    expect(normalizeServiceUrl("")).toBeNull();
+    expect(normalizeServiceUrl("super me")).toBeNull();
+    expect(normalizeServiceUrl("superme")).toBeNull();
+    expect(normalizeServiceUrl("ftp://example.com")).toBeNull();
+    expect(normalizeServiceUrl("javascript://example.com")).toBeNull();
+  });
+});
+
+describe("customServiceDraft", () => {
+  it("derives a name from a typed address", () => {
+    expect(customServiceDraft("https://www.superme.ai/")).toEqual({
+      name: "Superme",
+      url: "https://www.superme.ai/",
+    });
+    expect(customServiceDraft("superme.ai")).toEqual({ name: "Superme", url: "https://superme.ai/" });
+  });
+  it("keeps a plain name and leaves the URL empty", () => {
+    expect(customServiceDraft("  Superme ")).toEqual({ name: "Superme", url: "" });
   });
 });

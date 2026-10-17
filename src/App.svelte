@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { accentFg, iconSrc, filterRecipes, snapIconSize } from "./lib/ui";
+  import {
+    accentFg,
+    iconSrc,
+    filterRecipes,
+    snapIconSize,
+    CUSTOM_RECIPE_ID,
+    normalizeServiceUrl,
+    customServiceDraft,
+  } from "./lib/ui";
   import { appVersion, checkForUpdate, installUpdate, type Update } from "./lib/updater";
   import { ask } from "@tauri-apps/plugin-dialog";
 
@@ -28,6 +36,7 @@
     deleteService,
     clearServiceCache,
     listRecipes,
+    serviceFavicon,
     createWorkspace,
     updateWorkspace,
     deleteWorkspace,
@@ -125,6 +134,9 @@
   let allRecipes = $state<RecipePreview[]>([]);
   let recipesLoading = $state(false);
   let newServiceName = $state("");
+  // Service perso (site quelconque) : formulaire ouvert depuis le filtre.
+  let customDraft = $state<{ name: string; url: string } | null>(null);
+  let customBusy = $state(false);
 
   const activeService = $derived(
     services.find((s) => s.id === activeId) ?? null,
@@ -233,6 +245,31 @@
 
   function markIconFailed(id: string) {
     failedIcons = new Set(failedIcons).add(id);
+  }
+
+  // Favicons des services « Use favicon as icon » (data URLs récupérées côté Rust).
+  let favicons = $state<Record<string, string>>({});
+  const faviconKeys = new Map<string, string>(); // service -> URL déjà demandée
+
+  $effect(() => {
+    for (const s of services) {
+      if (!s.useFavicon) continue;
+      const key = `${s.recipeId}|${s.customUrl ?? ""}|${s.team ?? ""}`;
+      if (faviconKeys.get(s.id) === key) continue;
+      faviconKeys.set(s.id, key);
+      serviceFavicon(s)
+        .then((icon) => {
+          if (faviconKeys.get(s.id) !== key) return;
+          if (icon) favicons[s.id] = icon;
+          else delete favicons[s.id];
+        })
+        .catch(() => {});
+    }
+  });
+
+  function onIconError(id: string) {
+    if (favicons[id]) delete favicons[id];
+    else markIconFailed(id);
   }
 
   async function loadAfterAuth() {
@@ -656,6 +693,7 @@
     view = "add";
     recipeQuery = "";
     newServiceName = "";
+    customDraft = null;
     hideServices();
     if (allRecipes.length === 0) {
       recipesLoading = true;
@@ -671,11 +709,51 @@
   }
 
   const filteredRecipes = $derived(filterRecipes(allRecipes, recipeQuery));
+  // Rien ne correspond exactement au filtre -> on propose d'en faire un service perso.
+  const offerCustom = $derived.by(() => {
+    const q = recipeQuery.trim().toLowerCase();
+    return (
+      q !== "" &&
+      !filteredRecipes.some((r) => r.name.toLowerCase() === q || r.id.toLowerCase() === q)
+    );
+  });
 
-  async function pickRecipe(r: RecipePreview) {
+  function openCustomForm(seed: string) {
+    error = null;
+    const draft = customServiceDraft(seed);
+    customDraft = { name: newServiceName.trim() || draft.name, url: draft.url };
+  }
+
+  async function submitCustomService(e: SubmitEvent) {
+    e.preventDefault();
+    if (!customDraft || customBusy) return;
+    const url = normalizeServiceUrl(customDraft.url);
+    if (!url) {
+      error = "Enter a web address, e.g. https://www.superme.ai";
+      return;
+    }
+    customBusy = true;
+    try {
+      const name = customDraft.name.trim() || customServiceDraft(url).name;
+      await addService(name, CUSTOM_RECIPE_ID, { customUrl: url, useFavicon: true });
+    } finally {
+      customBusy = false;
+    }
+  }
+
+  function pickRecipe(r: RecipePreview) {
+    // La recette « Custom Website » n'a pas d'URL propre : on demande laquelle.
+    if (r.id === CUSTOM_RECIPE_ID) openCustomForm(recipeQuery);
+    else return addService(newServiceName.trim() || r.name, r.id);
+  }
+
+  // Crée le service puis applique les réglages initiaux (`extra`), l'API de création
+  // n'acceptant que nom + recette.
+  async function addService(name: string, recipeId: string, extra?: Partial<Service>) {
+    error = null;
     try {
       // On récupère l'id du service créé pour ouvrir LE bon (pas un ancien du même recipe).
-      const res = (await createService(newServiceName.trim() || r.name, r.id)) as {
+      const res = (await createService(name, recipeId)) as {
         id?: string;
         data?: { id?: string };
         service?: { id?: string };
@@ -686,11 +764,16 @@
         getWorkspaces(),
       ]);
       await Promise.all(services.map((s) => setServiceFlags(s).catch(() => {})));
-      const created =
-        (newId && services.find((s) => s.id === newId)) ??
-        sorted.find((s) => s.recipeId === r.id) ??
+      let created: Service | null =
+        (newId ? services.find((s) => s.id === newId) : undefined) ??
+        sorted.findLast((s) => s.recipeId === recipeId) ??
         sorted.at(-1) ??
         null;
+      if (created && extra) {
+        await updateService(created.id, { name: created.name, ...extra });
+        services = await getServices();
+        created = services.find((s) => s.id === created?.id) ?? created;
+      }
       if (created && activeWorkspace) {
         const workspace = workspaces.find((w) => w.id === activeWorkspace);
         if (workspace && !workspace.services.includes(created.id)) {
@@ -985,7 +1068,7 @@
               <p class="desc">Dark Reader fine-tuning (applies to this service's dark mode).</p>
             </div>
           {/if}
-          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon (not rendered locally yet).", "useFavicon", settingsSvc.useFavicon === true)}
+          {@render toggle("Use favicon as icon", "Use the site's favicon instead of the recipe icon.", "useFavicon", settingsSvc.useFavicon === true)}
           {@render toggle("Progress bar", "Tauridium already shows a loading spinner per service.", "isProgressbarEnabled", settingsSvc.isProgressbarEnabled === true)}
           <div class="setrow">
             <label class="block">
@@ -1044,10 +1127,37 @@
           <input
             class="filter"
             bind:value={recipeQuery}
-            placeholder="Filter among {allRecipes.length} services…"
+            placeholder="Filter among {allRecipes.length} services, or type any website…"
           />
           {#if error}<p class="error">{error}</p>{/if}
-          {#if recipesLoading}
+          {#if customDraft}
+            <form class="custom-form" onsubmit={submitCustomService}>
+              <div class="set-title">Custom service</div>
+              <label class="block">
+                Name
+                <input bind:value={customDraft.name} placeholder="e.g. Superme" />
+              </label>
+              <label class="block">
+                Web address
+                <!-- svelte-ignore a11y_autofocus -->
+                <input
+                  bind:value={customDraft.url}
+                  placeholder="https://www.superme.ai"
+                  inputmode="url"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  autofocus
+                />
+              </label>
+              <p class="sub">The site's favicon is used as the service icon.</p>
+              <span class="head-actions">
+                <button class="primary sm" type="submit" disabled={customBusy || !customDraft.url.trim()}>
+                  {customBusy ? "Creating…" : "Create service"}
+                </button>
+                <button class="link" type="button" onclick={() => (customDraft = null)}>Back to catalog</button>
+              </span>
+            </form>
+          {:else if recipesLoading}
             <p class="sub">Loading catalog…</p>
           {:else}
             <div class="results">
@@ -1062,6 +1172,13 @@
               {:else}
                 <p class="sub">No service matches.</p>
               {/each}
+              {#if offerCustom}
+                <button class="result create" onclick={() => openCustomForm(recipeQuery)}>
+                  <span class="result-icon plus" aria-hidden="true">+</span>
+                  <span class="result-name">Create “{recipeQuery.trim()}” as a custom service</span>
+                  <span class="result-id">any website</span>
+                </button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1301,10 +1418,10 @@
       title={`${s.name}${hibernated.has(s.id) ? " (hibernated)" : ""}`}
       onclick={() => selectService(s)}
     >
-      {#if failedIcons.has(s.id)}
+      {#if failedIcons.has(s.id) && !favicons[s.id]}
         <span class="dot">{s.name.slice(0, 1)}</span>
       {:else}
-        <img class="svc-icon" src={iconSrc(s)} alt="" onerror={() => markIconFailed(s.id)} />
+        <img class="svc-icon" src={iconSrc(s, favicons[s.id])} alt="" onerror={() => onIconError(s.id)} />
       {/if}
       {#if railExpanded}<span class="srow-name">{s.name}</span>{/if}
       {#if (unreadMap[s.id] ?? 0) > 0 && (s.isMuted !== true || appSettings.showMessageBadgeWhenMuted)}
@@ -1552,7 +1669,7 @@
   .dz-hint { margin: 3px 0 0; font-size: 12px; color: var(--muted); max-width: 380px; }
   .results { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
   .result {
-    display: flex; justify-content: space-between; align-items: center;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
     background: var(--input); border: 1px solid var(--border); border-radius: 8px;
     padding: 9px 11px; cursor: pointer; color: var(--text); text-align: left;
   }
@@ -1560,4 +1677,13 @@
   .result-icon { width: 22px; height: 22px; border-radius: 5px; flex: none; }
   .result-name { flex: 1; }
   .result-id { color: var(--muted2); font-size: 12px; }
+  .result.create { border-style: dashed; }
+  .result-icon.plus {
+    display: grid; place-items: center;
+    background: var(--hover); color: var(--accent-soft); font-weight: 700;
+  }
+  .custom-form {
+    display: flex; flex-direction: column; gap: 10px; padding: 14px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--input);
+  }
 </style>
