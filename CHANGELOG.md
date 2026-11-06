@@ -14,6 +14,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **macOS app icon follows the system style.** On macOS 26 and later the icon
+  gets the Liquid Glass treatment and the Default, Dark, Clear and Tinted looks.
+  Earlier versions keep the existing icon.
+
 ## [0.1.13] - 2026-10-17
 
 ### Added
